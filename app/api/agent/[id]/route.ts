@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { readSessionHeader } from "@/lib/session-reader";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
-import { startRpcSession, getRpcSession, resolveSpawnCwdResult, WebRpcError } from "@/lib/rpc-manager";
+import { startRpcSession, getRpcSession, resolveSpawnCwdResult, launchConfigForCwd, isAdvisorEnabled, WebRpcError } from "@/lib/rpc-manager";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
@@ -62,14 +62,14 @@ export async function POST(
     const advisor = new URL(req.url).searchParams.get("advisor") === "1";
 
     // Fast path: already-running session. --advisor is a spawn-time flag with
-    // no runtime RPC, so a toggle that now differs from the live child's spawn
-    // flag must replace an idle child to take effect; busy children keep
-    // running and pick the flag up at the next natural respawn.
+    // no runtime RPC, so an effective flag (chat OR workspace) that differs
+    // from the live child's spawn flag must replace an idle child; busy
+    // children keep running and pick it up at the next natural respawn.
     const existing = getRpcSession(id);
     const noSpawn = Object.hasOwn(NO_SPAWN_REPLIES, body.type);
     const liveOnly = LIVE_SESSION_ONLY.has(body.type);
     if (existing?.isAlive()) {
-      if (noSpawn || liveOnly || existing.advisorSpawned === advisor || existing.isRunning()) {
+      if (noSpawn || liveOnly || existing.isRunning() || existing.advisorSpawned === isAdvisorEnabled(advisor, launchConfigForCwd(existing.cwd))) {
         const result = await existing.send(body);
         return NextResponse.json({ success: true, data: result });
       }

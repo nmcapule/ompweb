@@ -24,6 +24,28 @@ A clean, modern web UI for the [oh-my-pi (omp)](https://github.com/can1357/oh-my
 
 </details>
 
+## Running this fixed fork
+
+This checkout builds `0.5.1-habi.1`. It fixes commands destroying a fresh
+workspace-advisor session when `?advisor=1` is absent, and includes the
+empty-history boundary handling needed before the first prompt is saved.
+A live fileless session returns `200 { "entryIds": [] }` for
+`GET /api/sessions/[id]/context?boundary=1`; a genuinely missing session still
+returns 404.
+
+Build and run the checkout rather than installing the upstream npm package:
+
+```sh
+npm ci
+npm run build
+OMP_WEB_DISABLE_AUTOUPDATE=1 OMP_WEB_NO_OPEN=1 PORT=30178 node bin/omp-web.js
+```
+
+Keep `OMP_WEB_DISABLE_AUTOUPDATE=1` in the service environment so the in-app
+updater cannot replace this fork with the upstream npm release. To update this
+fork, update its checkout, rebuild it, and restart its service.
+
+
 ## Requirements
 
 - [omp](https://github.com/can1357/oh-my-pi) installed and available on your `PATH` (or specified via `OMP_WEB_OMP_BIN`)

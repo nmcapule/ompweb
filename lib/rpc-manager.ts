@@ -212,8 +212,7 @@ export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[],
       if (mapped.length > 0) args.push("--tools", mapped.join(","));
     }
   }
-  if (advisor) args.push("--advisor");
-  else if (launchConfig?.advisor) args.push("--advisor");
+  if (isAdvisorEnabled(advisor, launchConfig)) args.push("--advisor");
   // Defense in depth: the registry is hand-editable, so re-strip reserved
   // args and dash-leading profiles at the spawn boundary even though the
   // API validates them on write.
@@ -2097,7 +2096,7 @@ export async function resumeInterruptedSessions(): Promise<void> {
 }
 
 /** Look up the workspace-registered launch config; unregistered projects attach none. */
-function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined {
+export function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined {
   let canonical = cwd;
   try { canonical = realpathSync(cwd); } catch {}
   const key = comparableProjectPath(canonical);
@@ -2106,6 +2105,11 @@ function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined {
     const projectKey = comparableProjectPath(project.path);
     return projectKey === key || key.startsWith(`${projectKey}-worktrees/`);
   })?.launchConfig;
+}
+
+/** Workspace advisor mode and the per-chat choice are additive. */
+export function isAdvisorEnabled(advisor: boolean | undefined, launchConfig?: ProjectLaunchConfig): boolean {
+  return advisor === true || launchConfig?.advisor === true;
 }
 
 /**
@@ -2134,7 +2138,7 @@ export async function startRpcSession(
   // workspace advisor=true forces the flag on. The gate must compare this
   // same effective value — comparing the raw toggle would destroy+respawn a
   // workspace-forced child on every toggle-off prompt.
-  const effectiveAdvisor = advisor === true || launchConfig?.advisor === true;
+  const effectiveAdvisor = isAdvisorEnabled(advisor, launchConfig);
 
   const existing = registry.get(sessionId);
   if (existing?.isAlive()) {
@@ -2184,7 +2188,7 @@ export async function startRpcSession(
       proc,
       cwd,
       recordedCwd,
-      advisor === true || launchConfig?.advisor === true,
+      effectiveAdvisor,
       sessionFile ? sessionId : "",
     );
     holder.wrapper = created;

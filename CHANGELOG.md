@@ -43,6 +43,8 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Fixes & Improvements
 
+- Keep fresh workspace-advisor sessions alive when a command omits `?advisor=1`: the POST reuse gate now compares the same chat-or-workspace advisor setting as process startup. Include the live, not-yet-persisted boundary handling and client empty-baseline behavior in the fixed fork build, so the first prompt does not fail with `session_not_found`.
+
 - Fit the agent's question panel on a phone. A long question, header or option preview no longer widens the panel past the screen and clips the answer text at the right edge, and previews wrap instead of scrolling sideways.
 - A question that arrives while you are composing on a touch device no longer pulls focus into its answer box, which raised the on-screen keyboard and scrolled the unread question away. The panel waits for a tap; on a desktop with a keyboard it focuses its first field as before.
 - Reach **Submit** with the keyboard open: the question panel is now capped to the visible area so its Cancel/Submit footer stays on screen, an inline send button appears beside the typed answer (same validation as the footer), and the dialog's buttons follow the **Touch Targets** setting.

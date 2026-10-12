@@ -1514,6 +1514,41 @@ test("abort_and_prompt: the aborted run's terminal agent_end is consumed, the ne
   assert.equal(w.latest.streamState.streamingMessage?.content?.[0]?.text, "new run streaming");
 });
 
+test("the first prompt starts after a live fileless session returns an empty persisted boundary", async () => {
+  resetWorld();
+  world.agents.set("fresh-fileless", { running: false, state: {} });
+  const w = await mountSession("fresh-fileless");
+  assert.equal(w.latest.loading, false);
+  assert.equal(w.latest.agentRunning, false);
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === "/api/sessions/fresh-fileless/context?boundary=1",
+    produce: async () => ({ status: 200, value: { entryIds: [] } }),
+  });
+
+  let sendPromise;
+  await act(async () => {
+    sendPromise = w.latest.handleSend("first prompt");
+    await sleep(30);
+  });
+  const es = lastEs();
+  await act(async () => {
+    es.open();
+    await sendPromise;
+  });
+  assert.equal(
+    callsTo("POST", "/api/agent/fresh-fileless").some((c) => c.body?.type === "prompt" && c.body?.message === "first prompt"),
+    true,
+  );
+  assert.equal(w.latest.agentRunning, true);
+  assert.equal(w.latest.notices.length, 0);
+  await act(async () => {
+    es.emit({ type: "agent_start" });
+    es.emit({ type: "message_update", message: assistantMsg("first-reply", "answer to first prompt") });
+  });
+  await settle(90);
+  assert.equal(w.latest.streamState.streamingMessage?.content?.[0]?.text, "answer to first prompt");
+});
+
 test("send tolerates a missing session file (local-only slash commands) and still dispatches", async () => {
   resetWorld();
   // A session whose only prompts were local slash commands never started an
