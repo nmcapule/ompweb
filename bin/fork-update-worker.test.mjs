@@ -298,4 +298,5 @@ test("generated release units are accepted by systemd, including spaces and perc
   writeFileSync(unit, worker.renderReleaseUnit(f.config, { directory, version: "1.0.0-habi.2" }, envPath));
   const verified = spawnSync("systemd-analyze", ["verify", unit], { encoding: "utf8" });
   assert.equal(verified.status, 0, verified.stderr);
+  assert.equal(verified.stderr, "", "a path setting cannot be ignored with a nonfatal parser diagnostic");
 });

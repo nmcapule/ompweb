@@ -229,8 +229,8 @@ async function probeRelease(config, port, version) {
     try {
       const response = await fetch(`http://127.0.0.1:${port}/api/app-update`, { headers: authenticationHeaders(config), signal: AbortSignal.timeout(4000), redirect: "error" });
       const body = await response.json();
-      if (response.ok && body.currentVersion === version) return;
-      last = `HTTP ${response.status}, version ${body.currentVersion}`;
+      if (response.ok && body.currentVersion === version && body.forkUpdateSupported === true && body.updatesDisabled === true) return;
+      last = `HTTP ${response.status}, version ${body.currentVersion}, fork updater ${body.forkUpdateSupported === true}, npm updates disabled ${body.updatesDisabled === true}`;
     } catch (error) { last = error.message; }
     await sleep(1000);
   }
@@ -239,9 +239,10 @@ async function probeRelease(config, port, version) {
 async function installFile(run, source, target, mode) { await run("sudo", ["-n", "install", "-m", mode, "--", source, target]); }
 function drainUnitName(service) { return `ompweb-fork-drain-${service.slice(0, -8)}.service`; }
 function renderReleaseUnit(config, candidate, envPath) {
-  // WorkingDirectory consumes one path, not a shell-style quoted word.
+  // Path directives consume one path; only ExecStart arguments use quoting.
   const directory = candidate.directory.replace(/%/g, "%%");
-  return `[Unit]\nDescription=OMP Web fork ${candidate.version}\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nType=simple\nUser=${config.user}\nWorkingDirectory=${directory}\nEnvironmentFile=${systemdQuote(envPath)}\nExecStart=:${systemdQuote(config.nodeBin)} ${systemdQuote(path.join(candidate.directory, "bin/omp-web.js"))}\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=30\n\n[Install]\nWantedBy=multi-user.target\n`;
+  const environmentFile = envPath.replace(/%/g, "%%");
+  return `[Unit]\nDescription=OMP Web fork ${candidate.version}\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nType=simple\nUser=${config.user}\nWorkingDirectory=${directory}\nEnvironmentFile=${environmentFile}\nExecStart=:${systemdQuote(config.nodeBin)} ${systemdQuote(path.join(candidate.directory, "bin/omp-web.js"))}\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=30\n\n[Install]\nWantedBy=multi-user.target\n`;
 }
 async function deployCandidate(config, attemptId, candidate, active, run, attemptDir) {
   const port = await choosePort(config, active);
@@ -261,7 +262,8 @@ async function deployCandidate(config, attemptId, candidate, active, run, attemp
   const proxyBackup = path.join(attemptDir, "nginx.original");
   let proxyChanged = false;
   try {
-    await run("sudo", ["-n", "systemd-analyze", "verify", unitFile]);
+    const validation = await run("sudo", ["-n", "systemd-analyze", "verify", unitFile]);
+    if (validation.stderr.trim()) throw new Error(`Release unit validation reported diagnostics: ${validation.stderr.trim()}`);
     await installFile(run, unitFile, `/etc/systemd/system/${service}`, "0644");
     await run("sudo", ["-n", "systemctl", "daemon-reload"]);
     await run("sudo", ["-n", "systemctl", "enable", "--now", service]);
