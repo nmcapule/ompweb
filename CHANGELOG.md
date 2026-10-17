@@ -4,6 +4,10 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ---
 
+## 0.5.2-habi.2
+
+- Restore **Settings → System & Updates → Update from upstream** for configured fork installations without enabling the upstream npm updater. Run the Git merge, dependency install, typecheck, full tests, production build, real-OMP session smoke, fork publication, separate-service deployment, nginx cutover, and old-session drain in an independent worker. Persist progress and actionable failures across browser reloads, prevent duplicate updates, and keep the current release on merge, verification, or publication failure. Preserve additive release notes while refusing ambiguous conflicts.
+
 ## 0.5.2-habi.1
 
 - Merge upstream `0.5.2` through `7cb3133`, including persistent SQLite notifications and chat, keyboard, and authentication improvements. Retain the fork's advisor-session and empty-history boundary fixes. Node.js 24 or newer is required.

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { isApiRequestOriginAllowed, shouldCheckApiRequestOrigin } from "@/lib/request-security";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { checkNpmUpdate } from "@/lib/npm-update";
+import { getForkUpdateSupport } from "@/lib/fork-update";
 import {
   abortPreparedSelfUpdate,
   acknowledgeSelfUpdate,
@@ -54,6 +55,7 @@ export async function GET(request: Request) {
   return NextResponse.json({
     ...status,
     selfUpdateSupported: support.supported,
+    forkUpdateSupported: getForkUpdateSupport().supported,
     ...(selfUpdateStatus ? { selfUpdateStatus } : {}),
   }, { headers: { "Cache-Control": "no-store" } });
 }

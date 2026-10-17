@@ -14,6 +14,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { SettingsTabs, type SettingsTab, SETTINGS_CATEGORIES, getNormalizedActive } from "./SettingsTabs";
 import { copyText } from "@/lib/clipboard";
 import type { AppUpdateInfo } from "./AppUpdateDialog";
+import { ForkUpdateControl } from "./ForkUpdateControl";
 import { useFontSize, type FontSizePreference } from "@/hooks/useFontSize";
 import { useUiScale, type UiScalePreference } from "@/hooks/useUiScale";
 import { useTouchTargets, type TouchTargetsPreference } from "@/hooks/useTouchTargets";
@@ -1756,6 +1757,9 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                 <AgentEnvSetting />
 
                 {/* ompweb app update card */}
+                {appUpdate?.forkUpdateSupported ? (
+                  <ForkUpdateControl currentVersion={appUpdate.currentVersion} />
+                ) : (
                 <section style={{ padding: 14, border: appUpdateIsAvailable ? "1px solid color-mix(in srgb, var(--accent) 45%, var(--border))" : "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", flexDirection: "column", gap: 10 }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
                     <div>
@@ -1814,6 +1818,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   )}
                   {appUpdateMessage && <Alert variant={appUpdateMessage.toLowerCase().includes("fail") || appUpdateMessage.toLowerCase().includes("error") ? "error" : "info"} description={appUpdateMessage} onDismiss={() => setAppUpdateMessage(null)} />}
                 </section>
+                )}
 
                 {/* OMP runtime update card */}
                 <section style={{ padding: 14, border: ompUpdateIsAvailable ? "1px solid color-mix(in srgb, var(--accent) 45%, var(--border))" : "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", flexDirection: "column", gap: 10 }}>

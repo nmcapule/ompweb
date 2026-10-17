@@ -26,7 +26,7 @@ A clean, modern web UI for the [oh-my-pi (omp)](https://github.com/can1357/oh-my
 
 ## Running this fixed fork
 
-This checkout builds `0.5.2-habi.1`, based on upstream `0.5.2` (`7cb3133`).
+This fork tracks upstream ompweb while retaining its local session fixes.
 It retains the fixes for commands destroying a fresh
 workspace-advisor session when `?advisor=1` is absent, and includes the
 empty-history boundary handling needed before the first prompt is saved.
@@ -46,6 +46,37 @@ Keep `OMP_WEB_DISABLE_AUTOUPDATE=1` in the service environment so the in-app
 updater cannot replace this fork with the upstream npm release. To update this
 fork, build a separate checkout first, then switch the service to that release.
 Do not rebuild `.next` in the active service's working directory.
+
+### Update from upstream
+
+On this installation, open **Settings → System & Updates → Update from upstream**.
+The button fetches the configured upstream and fork remotes, merges in a separate
+Git worktree, retains the `-habi.N` version, installs dependencies, typechecks,
+runs the full test suite, builds, and smoke-tests fresh sessions with real OMP.
+Only then does it push the fork branch, start a separate release service, and
+switch nginx traffic. Existing running chats drain before their old service stops.
+Reload after the success message to load the new client. Closing the tab does not
+stop the independently supervised worker; reopening Settings restores its status.
+If the source and upstream are already deployed, it reports that no update is needed.
+
+Uncommitted source files, diverged branches, ambiguous merge conflicts, failed
+checks, and failed pushes stop the update without changing the running release.
+Only version-only package conflicts and independent added changelog entries are
+combined automatically. A failed nginx rollback is reported with both services
+retained for operator recovery. The other deployment slot must finish draining
+before another release can use it. Retired release worktrees are kept for rollback.
+
+This control is enabled by `OMP_WEB_FORK_UPDATE_CONFIG`, which points to a private
+host configuration file (here `~/.config/ompweb-fork/update.json`). It pins the source
+directory and branch, Git remotes, release/state directories, nginx configuration,
+Node/OMP binaries, service user, two loopback ports, and server environment. Config
+and state files use mode `0600`, their directories `0700`. The registered deployment
+is in `~/.local/state/ompweb-fork-updates/active.json`; per-attempt logs and persisted
+status are in the same state directory. Inspect a failed attempt's log before retrying.
+Node.js 24+, Linux/systemd, nginx, authenticated Git push access, and passwordless
+`sudo` for service/proxy deployment are required. Enable this only on an authenticated
+or private installation. The browser cannot supply paths, Git refs, or shell commands.
+
 
 
 ## Requirements
