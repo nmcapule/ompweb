@@ -7,6 +7,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 ## 0.5.2-habi.2
 
 - Restore **Settings → System & Updates → Update from upstream** for configured fork installations without enabling the upstream npm updater. Run the Git merge, dependency install, typecheck, full tests, production build, real-OMP session smoke, fork publication, separate-service deployment, nginx cutover, and old-session drain in an independent worker. Persist progress and actionable failures across browser reloads, prevent duplicate updates, and keep the current release on merge, verification, or publication failure. Preserve additive release notes while refusing ambiguous conflicts.
+- Validate generated release units with `systemd-analyze verify` before installation. Keep `WorkingDirectory` in systemd's path syntax rather than shell quoting; regression coverage checks real systemd parsing with spaces and percent signs.
 
 ## 0.5.2-habi.1
 

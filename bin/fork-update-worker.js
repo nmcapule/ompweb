@@ -238,6 +238,11 @@ async function probeRelease(config, port, version) {
 }
 async function installFile(run, source, target, mode) { await run("sudo", ["-n", "install", "-m", mode, "--", source, target]); }
 function drainUnitName(service) { return `ompweb-fork-drain-${service.slice(0, -8)}.service`; }
+function renderReleaseUnit(config, candidate, envPath) {
+  // WorkingDirectory consumes one path, not a shell-style quoted word.
+  const directory = candidate.directory.replace(/%/g, "%%");
+  return `[Unit]\nDescription=OMP Web fork ${candidate.version}\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nType=simple\nUser=${config.user}\nWorkingDirectory=${directory}\nEnvironmentFile=${systemdQuote(envPath)}\nExecStart=:${systemdQuote(config.nodeBin)} ${systemdQuote(path.join(candidate.directory, "bin/omp-web.js"))}\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=30\n\n[Install]\nWantedBy=multi-user.target\n`;
+}
 async function deployCandidate(config, attemptId, candidate, active, run, attemptDir) {
   const port = await choosePort(config, active);
   const service = `ompweb-fork-${attemptId}.service`;
@@ -250,12 +255,13 @@ async function deployCandidate(config, attemptId, candidate, active, run, attemp
   const envPath = path.join(attemptDir, "server.env");
   fs.writeFileSync(envPath, serializeServiceEnv(environment), { mode: 0o600, flag: "wx" });
   const unitFile = path.join(attemptDir, service);
-  fs.writeFileSync(unitFile, `[Unit]\nDescription=OMP Web fork ${candidate.version}\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nType=simple\nUser=${config.user}\nWorkingDirectory=${systemdQuote(candidate.directory)}\nEnvironmentFile=${systemdQuote(envPath)}\nExecStart=:${systemdQuote(config.nodeBin)} ${systemdQuote(path.join(candidate.directory, "bin/omp-web.js"))}\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=30\n\n[Install]\nWantedBy=multi-user.target\n`, { mode: 0o600, flag: "wx" });
+  fs.writeFileSync(unitFile, renderReleaseUnit(config, candidate, envPath), { mode: 0o600, flag: "wx" });
   let drainScheduled = false, cutover = false, markerCreated = false;
   const marker = path.join(drainingDirectory(config), `${active.service}.json`);
   const proxyBackup = path.join(attemptDir, "nginx.original");
   let proxyChanged = false;
   try {
+    await run("sudo", ["-n", "systemd-analyze", "verify", unitFile]);
     await installFile(run, unitFile, `/etc/systemd/system/${service}`, "0644");
     await run("sudo", ["-n", "systemctl", "daemon-reload"]);
     await run("sudo", ["-n", "systemctl", "enable", "--now", service]);
@@ -415,4 +421,4 @@ if (require.main === module) {
     else if ((await runUpdate(config, args["--attempt"])).state === "failed") process.exitCode = 1;
   })().catch((error) => { console.error(error.message); process.exitCode = 1; });
 }
-module.exports = { commandEnvironment, createRunner, assertSource, prepareCandidate, verifyCandidate, publishCandidate, forkVersion, choosePort, waitForIdleStream, runUpdate, parseArgs };
+module.exports = { commandEnvironment, createRunner, assertSource, prepareCandidate, verifyCandidate, publishCandidate, forkVersion, choosePort, waitForIdleStream, renderReleaseUnit, runUpdate, parseArgs };

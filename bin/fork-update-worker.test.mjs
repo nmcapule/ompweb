@@ -5,9 +5,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { test as nodeTest } from "node:test";
 import worker from "./fork-update-worker.js";
 import state from "./fork-update-state.js";
+
+const test = process.platform === "linux" ? nodeTest : nodeTest.skip;
 
 function git(cwd, ...args) {
   const result = spawnSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } });
@@ -282,4 +284,18 @@ test("an existing slot directory remains reusable, but a free draining slot is w
   assert.deepEqual(state.readActive(f.config), f.active);
   rmSync(marker);
   assert.equal(await worker.choosePort(f.config, f.active), port);
+});
+
+test("generated release units are accepted by systemd, including spaces and percent signs in paths", (t) => {
+  const available = spawnSync("systemd-analyze", ["--version"], { encoding: "utf8" });
+  if (process.platform !== "linux" || available.error?.code === "ENOENT") return t.skip("systemd-analyze is not installed");
+  const f = fixture(t);
+  const directory = join(f.config.releasesDir, "release with spaces % marker");
+  mkdirSync(directory);
+  const envPath = join(f.root, "server environment.env");
+  writeFileSync(envPath, 'PORT="30178"\n', { mode: 0o600 });
+  const unit = join(f.root, "fork-update-generated.service");
+  writeFileSync(unit, worker.renderReleaseUnit(f.config, { directory, version: "1.0.0-habi.2" }, envPath));
+  const verified = spawnSync("systemd-analyze", ["verify", unit], { encoding: "utf8" });
+  assert.equal(verified.status, 0, verified.stderr);
 });

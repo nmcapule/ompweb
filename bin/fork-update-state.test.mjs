@@ -3,8 +3,10 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { test as nodeTest } from "node:test";
 import state from "./fork-update-state.js";
+
+const test = process.platform === "linux" ? nodeTest : nodeTest.skip;
 
 function fixture(t, patch = {}) {
   const root = mkdtempSync(join(tmpdir(), "fork-state-test-"));
