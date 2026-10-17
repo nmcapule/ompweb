@@ -1,6 +1,6 @@
 "use strict";
 
-const MIN_NODE_VERSION = "22.19.0";
+const MIN_NODE_VERSION = "24.0.0";
 
 function parseNodeVersion(version) {
   const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version);
@@ -28,8 +28,16 @@ function getUnsupportedNodeVersionMessage(version) {
   ].join("\n");
 }
 
+/** First statement of every published executable: npm treats `engines` as advisory. */
+function exitIfUnsupportedNode() {
+  if (isNodeVersionSupported(process.versions.node)) return;
+  console.error(getUnsupportedNodeVersionMessage(process.versions.node));
+  process.exit(1);
+}
+
 module.exports = {
   MIN_NODE_VERSION,
+  exitIfUnsupportedNode,
   getUnsupportedNodeVersionMessage,
   isNodeVersionSupported,
 };

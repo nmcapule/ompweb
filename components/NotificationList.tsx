@@ -3,17 +3,20 @@
 import { BellOff, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "@/lib/i18n";
-import { ClampedDescription, createSwipeTracker, descriptionBaseStyle, dismissButtonStyle, DRAG_SLOP_PX, KindIcon, toastHistory, useDragClickGuard, useToastHistory, type SwipeTracker, type ToastHistoryEntry } from "./ui/toast";
+import { OPEN_SESSION_EVENT } from "@/lib/notification-client";
+import { renderNotification, type NotificationHistoryEntry } from "@/lib/notification-events";
+import { notificationHistory, useNotificationHistory } from "@/lib/notification-history";
+import { ClampedDescription, createSwipeTracker, descriptionBaseStyle, dismissButtonStyle, DRAG_SLOP_PX, KindIcon, useDragClickGuard, type SwipeTracker } from "./ui/toast";
 
 /** Sideways travel that dismisses on release, the same distance as base-ui's toast swipe. */
 const SWIPE_DISMISS_PX = 40;
 /** Outlasts the 150ms exit transition; a timer, because a hidden panel cancels transitionend. */
 const EXIT_MS = 200;
 
-/** Notifications tab of the right panel: recent toasts and OS notifications, newest first. */
+/** Notifications tab of the right panel: the persisted notification history, newest first. */
 export function NotificationList() {
   const { t } = useI18n();
-  const entries = useToastHistory();
+  const entries = useNotificationHistory();
   if (entries.length === 0) {
     return (
       <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 24, textAlign: "center" }}>
@@ -37,8 +40,15 @@ export function NotificationList() {
  * a mouse drag keeps selecting text. The swipe can start anywhere on the row
  * except its buttons and links.
  */
-function NotificationRow({ entry }: { entry: ToastHistoryEntry }) {
+function NotificationRow({ entry }: { entry: NotificationHistoryEntry }) {
   const { t, locale } = useI18n();
+  const { title, body } = renderNotification(entry.event, t);
+  const { sessionId } = entry.event;
+  // Following a notification is reading it.
+  const open = sessionId ? () => {
+    notificationHistory.markRead(entry.id);
+    window.dispatchEvent(new CustomEvent(OPEN_SESSION_EVENT, { detail: sessionId }));
+  } : undefined;
   const clickGuard = useDragClickGuard();
   const drag = useRef<{ id: number; x: number; y: number; claimed: boolean; tracker: SwipeTracker } | null>(null);
   const [offset, setOffset] = useState(0);
@@ -46,12 +56,20 @@ function NotificationRow({ entry }: { entry: ToastHistoryEntry }) {
   const [dragging, setDragging] = useState(false);
   useEffect(() => {
     if (!leaving) return;
-    const timer = setTimeout(() => toastHistory.remove(entry.id), EXIT_MS);
+    const timer = setTimeout(() => notificationHistory.remove(entry.id), EXIT_MS);
     return () => clearTimeout(timer);
   }, [leaving, entry.id]);
   return (
     <li
       data-swipe-dismiss
+      // With an action the row is the only way to run it (there is no Open link), so keyboard users can focus it.
+      tabIndex={open ? 0 : undefined}
+      className={open ? "ui-focus-ring" : undefined}
+      onKeyDown={open ? (event) => {
+        if (event.key !== "Enter" || event.target !== event.currentTarget) return;
+        event.preventDefault();
+        open();
+      } : undefined}
       onPointerDown={(event) => {
         clickGuard.onPointerDown(event);
         // A second finger never takes over a swipe in progress; any other
@@ -98,6 +116,12 @@ function NotificationRow({ entry }: { entry: ToastHistoryEntry }) {
         setOffset(0);
       }}
       onClickCapture={clickGuard.onClickCapture}
+      // Like the toast card: a click anywhere but the controls and expandable text opens it.
+      onClick={open ? (event) => {
+        if (event.target instanceof Element && event.target.closest("button, a, input, textarea, select, [aria-expanded]")) return;
+        if (window.getSelection()?.isCollapsed === false) return;
+        open();
+      } : undefined}
       style={{
         display: "flex",
         alignItems: "flex-start",
@@ -105,28 +129,28 @@ function NotificationRow({ entry }: { entry: ToastHistoryEntry }) {
         padding: 8,
         borderRadius: "var(--radius-control)",
         background: entry.read ? undefined : "var(--bg-subtle)",
+        cursor: open ? "pointer" : undefined,
         touchAction: "pan-y",
         transform: leaving ? `translateX(${leaving * 110}%)` : offset ? `translateX(${offset}px)` : undefined,
         opacity: leaving ? 0 : 1 - Math.min(Math.abs(offset) / 400, 0.5),
         transition: dragging ? "none" : "transform var(--dur-fast) var(--ease-out-warm), opacity var(--dur-fast) var(--ease-out-warm)",
       }}
     >
-      <KindIcon kind={entry.kind} />
+      {/* Unread marker in a fixed leading slot, so read and unread rows keep their text aligned. */}
+      <span style={{ width: 8, flexShrink: 0, display: "flex", justifyContent: "center", paddingTop: 6 }}>
+        {!entry.read && <span role="img" aria-label={t("appShell.notificationUnread")} style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--accent)" }} />}
+      </span>
+      <KindIcon kind={entry.event.type === "error" ? "error" : "info"} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
-          <span className="display-serif" style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.4, overflowWrap: "anywhere" }}>{entry.title}</span>
-          {!entry.read && (
-            <span role="img" aria-label={t("appShell.notificationUnread")} style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--accent)", flexShrink: 0, alignSelf: "center" }} />
-          )}
+          <span className="display-serif" style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.4, overflowWrap: "anywhere", color: entry.read ? "var(--text-muted)" : "var(--text)", fontWeight: entry.read ? 400 : 600 }}>{title}</span>
           <time dateTime={new Date(entry.at).toISOString()} style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>
             {new Date(entry.at).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })}
           </time>
         </div>
-        {entry.description != null && (
-          <div style={{ ...descriptionBaseStyle, overflowWrap: "anywhere" }}>
-            {entry.clamp ? <ClampedDescription>{entry.description}</ClampedDescription> : entry.description}
-          </div>
-        )}
+        <div style={{ ...descriptionBaseStyle, overflowWrap: "anywhere" }}>
+          <ClampedDescription>{body}</ClampedDescription>
+        </div>
       </div>
       <button
         type="button"
@@ -134,7 +158,7 @@ function NotificationRow({ entry }: { entry: ToastHistoryEntry }) {
           // Dismissing unmounts this button (and the list, if it was the
           // last entry); keep keyboard focus in the always-mounted tab panel.
           const panel = event.currentTarget.closest<HTMLElement>('[role="tabpanel"]');
-          toastHistory.remove(entry.id);
+          notificationHistory.remove(entry.id);
           panel?.focus();
         }}
         aria-label={t("appShell.notificationDismiss")}

@@ -228,6 +228,22 @@ class TrayApplication : IDisposable
         return "node.exe";
     }
 
+    // Copy an omp-web credential from the user (then system) environment into the child,
+    // or remove it there. The tray's own environment was captured at logon, so a value
+    // changed or removed with `setx` since then must not survive a server restart: the
+    // old password would keep working after rotation.
+    private static string? SetChildCredential(ProcessStartInfo psi, string name)
+    {
+        var value = Environment.GetEnvironmentVariable(name, EnvironmentVariableTarget.User);
+        if (string.IsNullOrEmpty(value))
+            value = Environment.GetEnvironmentVariable(name, EnvironmentVariableTarget.Machine);
+        if (string.IsNullOrEmpty(value))
+            psi.EnvironmentVariables.Remove(name);
+        else
+            psi.EnvironmentVariables[name] = value;
+        return value;
+    }
+
     private void StartWebServer()
     {
         if (_childProcess != null && !_childProcess.HasExited) return;
@@ -262,6 +278,12 @@ class TrayApplication : IDisposable
         psi.EnvironmentVariables["OMP_WEB_HOSTNAME"] = _effectiveHostname;
         psi.EnvironmentVariables["OMP_WEB_SERVICE"] = "1";
         psi.EnvironmentVariables["PORT"] = _effectivePort.ToString();
+        // bin/omp-web.js refuses a non-loopback bind without a password hash. A plaintext
+        // OMP_WEB_PASSWORD is passed through only so the server can refuse it with instructions.
+        if (string.IsNullOrEmpty(SetChildCredential(psi, "OMP_WEB_PASSWORD_HASH")))
+            WriteLog("WARN: OMP_WEB_PASSWORD_HASH not found in the user or system environment; a non-loopback bind will be refused by bin/omp-web.js (generate one with: ompweb hash-password)");
+        SetChildCredential(psi, "OMP_WEB_PASSWORD");
+        SetChildCredential(psi, "OMP_WEB_TRUSTED_HEADER_SHA256");
 
         var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
         proc.OutputDataReceived += (s, e) => { if (!string.IsNullOrEmpty(e.Data)) WriteLog($"[STDOUT] {e.Data}"); };

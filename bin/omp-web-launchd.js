@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 "use strict";
 
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+require("./node-version").exitIfUnsupportedNode();
+
 // Install ompweb as a macOS launchd user agent (starts at login, restarts on crash).
 //
 // Usage (installed as the `ompweb-launchd` bin, or run via npx / node directly):
@@ -80,7 +83,7 @@ function install(pkgArg) {
   const noOpen = process.env.OMP_WEB_NO_OPEN ?? "1";
   const disableAutoUpdate = process.env.OMP_WEB_DISABLE_AUTOUPDATE;
   const installName = process.env.OMP_WEB_NAME;
-  // Only a hash is stored in the plist: omp-web never reads a plaintext
+  // Only a hash is stored in the plist: omp-web never forwards a plaintext
   // password, and `OMP_WEB_PASSWORD` set for this install is hashed here.
   let passwordHash;
   try {
@@ -88,6 +91,7 @@ function install(pkgArg) {
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }
+  const trustedHeaderDigest = process.env.OMP_WEB_TRUSTED_HEADER_SHA256;
   const agentDir = process.env.PI_CODING_AGENT_DIR?.replace(/^~(?=\/|$)/, HOME);
 
   const asdfBin = which("asdf");
@@ -110,6 +114,7 @@ function install(pkgArg) {
     ...(disableAutoUpdate ? { OMP_WEB_DISABLE_AUTOUPDATE: disableAutoUpdate } : {}),
     ...(installName ? { OMP_WEB_NAME: installName } : {}),
     ...(passwordHash ? { OMP_WEB_PASSWORD_HASH: passwordHash } : {}),
+    ...(trustedHeaderDigest ? { OMP_WEB_TRUSTED_HEADER_SHA256: trustedHeaderDigest } : {}),
     ...(ompBin ? { OMP_WEB_OMP_BIN: ompBin } : {}),
     ...(agentDir ? { PI_CODING_AGENT_DIR: agentDir } : {}),
   };

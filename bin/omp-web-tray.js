@@ -2,6 +2,9 @@
 "use strict";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
+require("./node-version").exitIfUnsupportedNode();
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const { parseArgs } = require("util");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { spawn } = require("child_process");

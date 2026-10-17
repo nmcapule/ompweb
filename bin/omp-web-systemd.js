@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 "use strict";
 
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+require("./node-version").exitIfUnsupportedNode();
+
 // Install ompweb as a Linux systemd user service.
 //
 // Usage:
@@ -303,7 +306,7 @@ function install(options = {}) {
     fail(error instanceof Error ? error.message : String(error));
   }
 
-  // Only the hash reaches the env file: omp-web never reads a plaintext
+  // Only the hash reaches the env file: omp-web never forwards a plaintext
   // password, and `OMP_WEB_PASSWORD` set for this install is hashed here.
   let passwordHash;
   try {
@@ -329,6 +332,7 @@ function install(options = {}) {
     ...(process.env.OMP_WEB_DISABLE_AUTOUPDATE ? { OMP_WEB_DISABLE_AUTOUPDATE: process.env.OMP_WEB_DISABLE_AUTOUPDATE } : {}),
     ...(process.env.OMP_WEB_NAME ? { OMP_WEB_NAME: process.env.OMP_WEB_NAME } : {}),
     ...(passwordHash ? { OMP_WEB_PASSWORD_HASH: passwordHash } : {}),
+    ...(process.env.OMP_WEB_TRUSTED_HEADER_SHA256 ? { OMP_WEB_TRUSTED_HEADER_SHA256: process.env.OMP_WEB_TRUSTED_HEADER_SHA256 } : {}),
     ...(ompBin ? { OMP_WEB_OMP_BIN: ompBin } : {}),
     ...(agentDir ? { PI_CODING_AGENT_DIR: agentDir } : {}),
   }, envPath);

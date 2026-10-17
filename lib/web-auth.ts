@@ -1,9 +1,11 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { deriveSessionSigningKey } from "./web-auth-secret";
 import { isPasswordHash, verifyPassword } from "./web-password-hash";
 
 export const OMP_WEB_SESSION_COOKIE = "omp_web_session";
 export const OMP_WEB_SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+// Set by a trusted reverse proxy (see README) to vouch for a request in place of a session.
+export const OMP_WEB_TRUSTED_HEADER = "x-omp-web-auth";
 
 /**
  * Password protection for the web UI (issue #239). Only a hash is accepted:
@@ -30,6 +32,16 @@ function configuredHash(env: NodeJS.ProcessEnv = process.env): string {
 /** True when a usable password hash is configured. */
 export function isWebPasswordEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return isPasswordHash(configuredHash(env));
+}
+
+// The proxy sends the secret itself; omp-web holds only its SHA-256 hex digest.
+// The secret is random, so a fast hash suffices.
+export function isTrustedProxyRequest(
+  value: string | null | undefined,
+  digest = process.env.OMP_WEB_TRUSTED_HEADER_SHA256,
+): boolean {
+  if (!value || !digest || !/^[0-9a-f]{64}$/i.test(digest)) return false;
+  return timingSafeEqual(createHash("sha256").update(value, "utf8").digest(), Buffer.from(digest, "hex"));
 }
 
 /** Check a sign-in attempt against the configured hash. */

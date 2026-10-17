@@ -12,7 +12,8 @@ import { useMobileSidebarGestures } from "@/hooks/useMobileSidebarGestures";
 import { SessionSidebar } from "./SessionSidebar";
 import type { WorktreeContext } from "./SessionSidebar-helpers";
 import { ToastProvider } from "./ui/toast";
-import { toast, toastHistory, useUnreadToastCount } from "./ui/toast";
+import { toast } from "./ui/toast";
+import { notificationHistory, useUnreadNotificationCount } from "@/lib/notification-history";
 import { ConfirmDialog } from "./ui/field";
 import { ChatWindow } from "./ChatWindow";
 import { type Tab } from "./TabBar";
@@ -998,13 +999,13 @@ export function AppShell({ appName }: { appName: string }) {
   }, [isCompactOverlay]);
   const [rightPanelHasOpened, setRightPanelHasOpened] = useState(false);
   const [rightView, setRightView] = useState<RightPanelView>("explorer");
-  const unreadNotifications = useUnreadToastCount();
+  const unreadNotifications = useUnreadNotificationCount();
   // Unread entries stay highlighted while the Notifications tab is shown and
   // become read once the user leaves it (switches tab or closes the panel).
   const viewingNotifications = rightPanelOpen && rightView === "notifications" && !settingsTab;
   const wasViewingNotificationsRef = useRef(false);
   useEffect(() => {
-    if (wasViewingNotificationsRef.current && !viewingNotifications) toastHistory.markAllRead();
+    if (wasViewingNotificationsRef.current && !viewingNotifications) notificationHistory.markAllRead();
     wasViewingNotificationsRef.current = viewingNotifications;
   }, [viewingNotifications]);
   const opensNotifications = unreadNotifications > 0 && !viewingNotifications;

@@ -569,7 +569,6 @@
   "chatWindow.askTitle": "エージェントからの質問",
   "chatWindow.askRecommended": "推奨",
   "chatWindow.askOther": "その他：自由に回答を入力",
-  "chatWindow.askSubmitAnswer": "回答を送信",
   "chatWindow.thinking": "思考中...",
   "chatWindow.subagentCount.one": "サブエージェント {count} 件",
   "chatWindow.subagentCount.other": "サブエージェント {count} 件",

@@ -4,7 +4,7 @@ Thanks for your interest in contributing!
 
 ## Setup
 
-- Node.js 22.19.0 or newer
+- Node.js 24 or newer
 - The [omp](https://github.com/can1357/oh-my-pi) binary on your `PATH` (or set `OMP_WEB_OMP_BIN`)
 
 ```bash
@@ -34,7 +34,7 @@ and `renderHook` for hook state and lifecycle tests. Keep the real jsdom
 
 Static HTML tests can continue using `react-dom/server`. Layout, scrolling,
 and native browser navigation still require real-browser verification.
-The jsdom dependency stays on 29.x to support the Node 22.19.0 baseline.
+The jsdom dependency stays on 29.x for now; moving to a newer major is a separate change.
 
 ## Conventions
 

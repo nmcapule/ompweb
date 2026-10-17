@@ -1,10 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { isApiRequestOriginAllowed, shouldCheckApiRequestOrigin } from "@/lib/request-security";
 import {
+  isTrustedProxyRequest,
   isValidWebSession,
   isWebPasswordEnabled,
   webPasswordConfigurationProblem,
   OMP_WEB_SESSION_COOKIE,
+  OMP_WEB_TRUSTED_HEADER,
 } from "@/lib/web-auth";
 
 export function proxy(request: NextRequest) {
@@ -29,7 +31,8 @@ export function proxy(request: NextRequest) {
   }
 
   const { pathname } = request.nextUrl;
-  const hasSession = isValidWebSession(request.cookies.get(OMP_WEB_SESSION_COOKIE)?.value);
+  const hasSession = isTrustedProxyRequest(request.headers.get(OMP_WEB_TRUSTED_HEADER))
+    || isValidWebSession(request.cookies.get(OMP_WEB_SESSION_COOKIE)?.value);
   if (pathname === "/login") {
     return hasSession ? NextResponse.redirect(new URL("/", request.url)) : NextResponse.next();
   }

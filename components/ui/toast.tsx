@@ -12,7 +12,7 @@
  */
 import { Toast } from "@base-ui/react/toast";
 import { AlertCircle, Check, Info, X } from "lucide-react";
-import { useRef, useState, useSyncExternalStore } from "react";
+import { useRef, useState } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type React from "react";
 
@@ -53,64 +53,9 @@ export function resolveToastTimeout(kind: ToastKind, options?: Pick<ToastOptions
   return options?.timeout ?? options?.duration ?? (kind === "error" ? ERROR_TIMEOUT_MS : DEFAULT_TIMEOUT_MS);
 }
 
-export const TOAST_HISTORY_LIMIT = 100;
-
-export interface ToastHistoryEntry {
-  id: string;
-  kind: ToastKind;
-  title: React.ReactNode;
-  description?: React.ReactNode;
-  clamp?: boolean;
-  at: number;
-  read: boolean;
-}
-
-let history: ToastHistoryEntry[] = [];
-const historyListeners = new Set<() => void>();
-function setHistory(next: ToastHistoryEntry[]) {
-  history = next;
-  for (const listener of historyListeners) listener();
-}
-
-let recordedCount = 0;
-
-/** Recent toasts and OS notifications, newest first, kept in memory for the notification center. */
-export const toastHistory = {
-  subscribe(listener: () => void) {
-    historyListeners.add(listener);
-    return () => { historyListeners.delete(listener); };
-  },
-  get: () => history,
-  /** Add an entry without showing a toast, e.g. for a notification already delivered by the OS. */
-  record(kind: ToastKind, title: React.ReactNode, description?: React.ReactNode, options?: { id?: string; clamp?: boolean }) {
-    const id = options?.id ?? `recorded-${++recordedCount}`;
-    // A reused id replaces its toast on screen, so it replaces its history entry
-    // too. It keeps its read state: re-announcing the same notice (e.g. an
-    // update toast on every tab focus) must not re-badge it.
-    const read = history.some((e) => e.id === id && e.read);
-    const entry: ToastHistoryEntry = { id, kind, title, description, clamp: options?.clamp, at: Date.now(), read };
-    setHistory([entry, ...history.filter((e) => e.id !== id)].slice(0, TOAST_HISTORY_LIMIT));
-  },
-  markAllRead: () => {
-    if (history.some((e) => !e.read)) setHistory(history.map((e) => e.read ? e : { ...e, read: true }));
-  },
-  remove: (id: string) => setHistory(history.filter((entry) => entry.id !== id)),
-  clear: () => setHistory([]),
-};
-
-export function useToastHistory(): ToastHistoryEntry[] {
-  return useSyncExternalStore(toastHistory.subscribe, toastHistory.get, toastHistory.get);
-}
-
-const unreadCount = () => history.reduce((count, entry) => count + (entry.read ? 0 : 1), 0);
-/** Unread entry count. A primitive snapshot, so callers re-render only when the count changes. */
-export function useUnreadToastCount(): number {
-  return useSyncExternalStore(toastHistory.subscribe, unreadCount, unreadCount);
-}
-
 function add(kind: ToastKind, title: React.ReactNode, description?: React.ReactNode, options?: ToastOptions) {
   const timeout = resolveToastTimeout(kind, options);
-  const id = manager.add({
+  return manager.add({
     id: options?.id,
     title,
     description,
@@ -119,8 +64,6 @@ function add(kind: ToastKind, title: React.ReactNode, description?: React.ReactN
     timeout,
     ...(options?.onClose ? { onClose: options.onClose } : {}),
   });
-  toastHistory.record(kind, title, description, { id, clamp: options?.clamp });
-  return id;
 }
 export const toast = {
   success: (title: React.ReactNode, description?: React.ReactNode, options?: ToastOptions) =>

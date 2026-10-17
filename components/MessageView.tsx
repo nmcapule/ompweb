@@ -979,7 +979,8 @@ const ToolCallBlock = memo(function ToolCallBlock({
             .map((b) => b.text)
             .join("\n"))
     : null;
-  const passiveContextText = result?.passiveContext ? contextLine(result.passiveContext, t) : null;
+  const passiveWrapper = result?.passiveContext ? parseLeadingWrapper(result.passiveContext) : null;
+  const passiveContextText = result?.passiveContext ? contextLine(result.passiveContext, passiveWrapper, t) : null;
   const resultImages = result && Array.isArray(result.content)
     ? result.content.filter((b): b is ImageContent => b.type === "image")
     : [];
@@ -1195,7 +1196,15 @@ const ToolCallBlock = memo(function ToolCallBlock({
             ) : null}
             {passiveContextText && (
               <div className="tool-call-context">
-                <span aria-hidden>↳ </span>{passiveContextText}
+                {passiveWrapper ? (
+                  // Nested like a developer message: the wrapper as a header, its body below.
+                  <div className="tool-call-context-card">
+                    <div className="tool-call-context-title"><span aria-hidden>↳ </span>{wrapperTitle(passiveWrapper)}</div>
+                    {passiveWrapper.body && <div className="tool-call-context-body">{passiveWrapper.body}</div>}
+                  </div>
+                ) : (
+                  <><span aria-hidden>↳ </span>{passiveContextText}</>
+                )}
               </div>
             )}
           </div>
@@ -1317,14 +1326,20 @@ function parseLeadingWrapper(text: string): { tag: string; attrs: [string, strin
   };
 }
 
-/** "Context (rule_violation · ts-set-map · …): body" for a wrapped passive context, plain otherwise. */
-function contextLine(text: string, t: (key: string, params?: Record<string, string>) => string): string {
-  const wrapper = parseLeadingWrapper(text);
-  const label = wrapper?.attrs.map(([, value]) => value).filter(Boolean).join(" · ");
-  const body = wrapper ? wrapper.body : text;
-  return label
-    ? t("messageView.passiveContextLabeled", { label, text: body })
-    : t("messageView.passiveContext", { text: body });
+/** `<system-reminder reason="…" rule="…">` → "system-reminder · reason=… · rule=…"; empty values are skipped. */
+function wrapperTitle(wrapper: { tag: string; attrs: [string, string][] }): string {
+  return [wrapper.tag, ...wrapper.attrs.filter(([, value]) => value).map(([key, value]) => `${key}=${value}`)].join(" · ");
+}
+
+/** "Context (system-reminder · rule=ts-set-map · …): body" for a wrapped passive context, plain otherwise. */
+function contextLine(
+  text: string,
+  wrapper: { tag: string; attrs: [string, string][]; body: string } | null,
+  t: (key: string, params?: Record<string, string>) => string,
+): string {
+  return wrapper
+    ? t("messageView.passiveContextLabeled", { label: wrapperTitle(wrapper), text: wrapper.body })
+    : t("messageView.passiveContext", { text });
 }
 
 function friendlyHiddenLabel(customType: string, t: (key: string) => string): string {
@@ -1559,12 +1574,11 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
   // them verbatim.
   const isPlainText = message.customType === "async-result" || message.customType === "lsp-late-diagnostic";
   const displayText = ircEnvelope ? ircEnvelope.body : isPlainText || isDeveloper ? stripHiddenWrappers(text) : text;
-  // `<system-reminder reason="…" rule="…">` → "system-reminder · reason=… · rule=…".
   const wrapper = isDeveloper ? parseLeadingWrapper(text) : null;
   const firstLine = displayText.split("\n").find((line) => line.trim())?.trim() ?? "";
   const collapsedPreview = firstLine && firstLine !== displayText.trim() ? `${firstLine} …` : firstLine;
   const title = wrapper
-    ? [wrapper.tag, ...wrapper.attrs.map(([key, value]) => `${key}=${value}`)].join(" · ")
+    ? wrapperTitle(wrapper)
     : isIrc
     ? (ircEnvelope?.sender ?? formatCustomType(message.customType))
     : message.customType === "advisor"

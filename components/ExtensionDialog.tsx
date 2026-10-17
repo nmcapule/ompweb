@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type RefObject } from "react";
-import { SendHorizontal } from "lucide-react";
+import { useEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import type { ExtensionUiRequest } from "@/lib/types";
 import type { RpcAskDialogAnswer } from "@/lib/pi-types";
 import { useI18n } from "@/lib/i18n";
@@ -20,8 +19,12 @@ export type ExtensionDialogResponse =
   | { cancelled: true }
   | { answers: RpcAskDialogAnswer[] };
 
-type AskDraft = { selected: string[]; other: string };
-const EMPTY_ASK_DRAFT: AskDraft = { selected: [], other: "" };
+// The Other text lives as long as the question: choosing a regular option only
+// unchooses it, so the text is still in its row when Other is chosen again.
+type AskDraft = { selected: string[]; other: string; otherChosen: boolean };
+const EMPTY_ASK_DRAFT: AskDraft = { selected: [], other: "", otherChosen: false };
+// Fields that raise the on-screen keyboard: every input but a radio/checkbox.
+const TEXT_ENTRY = "input:not([type=radio]):not([type=checkbox]), textarea";
 
 // Keyboard-aware panel height. The on-screen keyboard shrinks the visible
 // area, so a panel sized against the layout viewport alone keeps its footer
@@ -71,23 +74,19 @@ function useViewportMaxHeight(): number | undefined {
   return useSyncExternalStore(subscribeViewport, readPanelMaxHeight, () => undefined);
 }
 
-/**
- * Whether the visible area is shorter than the layout viewport, which is how
- * an on-screen keyboard shows up: browsers cannot report the keyboard itself,
- * and an inline `<textarea>` does not necessarily resize the page.
- */
-function isKeyboardOpen(): boolean {
-  if (typeof window === "undefined") return false;
+/** Height of the visible area, falling back to the layout viewport. */
+function visibleHeight(): number {
   const visual = window.visualViewport?.height;
-  return typeof visual === "number" && visual > 0 && visual < window.innerHeight - KEYBOARD_INSET;
+  return typeof visual === "number" && visual > 0 ? visual : window.innerHeight;
 }
 
 /**
  * Per-panel soft-keyboard tracking for a composer-attached request, active
- * only while focus is inside the panel. A panel in the composer is not a
- * modal, so the browser is free to scroll the page when the keyboard opens;
- * this is what keeps the footer (Cancel / Submit) inside the visible area and
- * what reveals the inline send control (#236).
+ * only while a text field inside the panel has focus. A panel in the composer
+ * is not a modal, so the browser is free to scroll the page when the keyboard
+ * opens; this is what keeps the footer (Cancel / Submit) inside the visible
+ * area (#236). A focused option or button raises no keyboard, so it must not
+ * resize the panel either: that resize made the tap that focused it miss.
  *
  * Two signals, because neither alone is enough: `visualViewport` shrinking is
  * the real keyboard (fingerprint-free), and a coarse pointer means the tap
@@ -102,28 +101,68 @@ function useMobileInputOpen(panelRef: RefObject<HTMLDivElement | null>, attached
       return;
     }
     let focused = false;
+    // Browsers cannot report the keyboard itself. It opens when the visible
+    // area drops well below the tallest seen at this width, and closes when
+    // the area grows well above its lowest since then. Comparing to
+    // `innerHeight` cannot work: with `interactive-widget: resizes-content`
+    // (app/layout.tsx) the keyboard shrinks the layout viewport too.
+    let width = window.innerWidth;
+    let fullHeight = Math.max(visibleHeight(), window.innerHeight);
+    // Lowest visible height while the keyboard is up; null while it is down.
+    let keyboardLow: number | null = null;
+    // `pointerType` of the latest press anywhere: a hybrid laptop's primary
+    // pointer is fine, yet a touch tap there still raises a soft keyboard.
+    let lastPointer: string | null = null;
+    const onPointerDown = (event: PointerEvent) => { lastPointer = event.pointerType; };
     const update = () => {
-      const isOpen = focused && (isKeyboardOpen() || touchPointer());
+      const height = visibleHeight();
+      const touch = lastPointer ? lastPointer !== "mouse" : touchPointer();
+      if (window.innerWidth !== width) {
+        // Rotation or a resized window: the old heights mean nothing at the
+        // new size. An open keyboard stays open; its collapse is still a rise.
+        width = window.innerWidth;
+        fullHeight = height;
+        if (keyboardLow !== null) keyboardLow = height;
+      }
+      fullHeight = Math.max(fullHeight, height);
+      if (!touch) {
+        // No soft keyboard: a window or docked dev tools resizing is not one.
+        keyboardLow = null;
+      } else if (keyboardLow === null) {
+        if (height < fullHeight - KEYBOARD_INSET) keyboardLow = height;
+      } else if (height > keyboardLow + KEYBOARD_INSET) {
+        keyboardLow = null;
+        // Collapsing the keyboard (back button, swipe) keeps the text field
+        // focused, and the next tap anywhere would raise it again for a
+        // moment. A closed keyboard means the user is done typing.
+        if (focused && document.activeElement instanceof HTMLElement) document.activeElement.blur();
+      } else {
+        keyboardLow = Math.min(keyboardLow, height);
+      }
+      // A keyboard over the page (no layout resize) shows on any device.
+      const overlaid = height < window.innerHeight - KEYBOARD_INSET;
+      const isOpen = focused && (touch || overlaid);
       setOpen((current) => (current === isOpen ? current : isOpen));
     };
     const onFocusIn = (event: FocusEvent) => {
-      const panel = panelRef.current;
-      focused = Boolean(panel && event.target instanceof Node && panel.contains(event.target));
+      const target = event.target;
+      focused = target instanceof Element && target.matches(TEXT_ENTRY) && Boolean(panelRef.current?.contains(target));
       update();
     };
     const onFocusOut = (event: FocusEvent) => {
-      const panel = panelRef.current;
       const next = event.relatedTarget;
-      focused = Boolean(next instanceof Node && panel && panel.contains(next));
+      focused = next instanceof Element && next.matches(TEXT_ENTRY) && Boolean(panelRef.current?.contains(next));
       update();
     };
     update();
+    document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("focusin", onFocusIn);
     document.addEventListener("focusout", onFocusOut);
     window.addEventListener("resize", update);
     window.visualViewport?.addEventListener("resize", update);
     const poll = setInterval(update, KEYBOARD_POLL_MS);
     return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("focusout", onFocusOut);
       window.removeEventListener("resize", update);
@@ -156,32 +195,12 @@ function touchPointer(): boolean {
   return !window.matchMedia("(pointer: fine)").matches;
 }
 
-/** Corner control so a typed answer can be submitted without dismissing the
- * keyboard to reach the footer behind it. */
-function inlineSubmitStyle(disabled: boolean, touchTarget: boolean): CSSProperties {
-  return {
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: "7px 9px",
-    minWidth: touchTarget ? 44 : undefined,
-    minHeight: touchTarget ? 44 : undefined,
-    borderRadius: 7,
-    border: `1px solid ${disabled ? "var(--border)" : "var(--accent-strong)"}`,
-    background: disabled ? "var(--bg-subtle)" : "var(--accent-strong)",
-    color: disabled ? "var(--text-dim)" : "var(--on-accent)",
-    cursor: disabled ? "not-allowed" : "pointer",
-    opacity: disabled ? 0.65 : 1,
-    flexShrink: 0,
-  };
-}
-
 /** Single-select questions start on their recommended option. */
 function initialAskDrafts(request: ExtensionDialogRequest): AskDraft[] {
   if (request.method !== "ask") return [];
   return request.questions.map((question) => {
     const recommended = question.multi || question.recommended === undefined ? undefined : question.options[question.recommended];
-    return { selected: recommended ? [recommended.label] : [], other: "" };
+    return { selected: recommended ? [recommended.label] : [], other: "", otherChosen: false };
   });
 }
 
@@ -209,6 +228,9 @@ export function ExtensionDialog({
   const [value, setValue] = useState(request.method === "editor" ? request.prefill ?? "" : "");
   const [selectedOption, setSelectedOption] = useState<string | null>(null);
   const requestIdRef = useRef(request.id);
+  // `pointerType` of the latest press: the pointer media query only describes
+  // the primary pointer, not the one pressing now.
+  const pressPointerRef = useRef<string | null>(null);
   const [askDrafts, setAskDrafts] = useState(() => initialAskDrafts(request));
   const viewportMaxHeight = useViewportMaxHeight();
   const { touchTargets } = useTouchTargets();
@@ -223,14 +245,27 @@ export function ExtensionDialog({
   }, [request]);
 
   const askDraftAt = (index: number) => askDrafts[index] ?? EMPTY_ASK_DRAFT;
-  // Multi-select may stay empty; single-select needs a choice or an answer.
+  const updateAskDraft = (index: number, update: (draft: AskDraft) => AskDraft) =>
+    setAskDrafts((drafts) => drafts.map((draft, i) => i === index ? update(draft) : draft));
+  // A chosen Other counts only with text. Multi-select may stay empty;
+  // single-select needs a choice or an answer.
   const canSubmit = request.method === "ask"
-    ? request.questions.every((question, index) =>
-      question.multi || askDraftAt(index).selected.length > 0 || askDraftAt(index).other.trim() !== "")
+    ? request.questions.every((question, index) => {
+      const { selected, other, otherChosen } = askDraftAt(index);
+      return question.multi || selected.length > 0 || (otherChosen && other.trim() !== "");
+    })
     : request.method !== "select" || selectedOption !== null;
   const title = request.method === "ask" ? t("chatWindow.askTitle") : request.title;
 
-  const cancel = () => onRespond(request, { cancelled: true });
+  // Answering removes the panel. Release its text field first, in the same
+  // task, so the phone keyboard closes once instead of flashing as the
+  // focused field disappears from under it.
+  const respond = (response: ExtensionDialogResponse) => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && panelRef.current?.contains(active)) active.blur();
+    onRespond(request, response);
+  };
+  const cancel = () => respond({ cancelled: true });
 
   // useModalDialog gives us: focus-in on open, focus-restore on close,
   // document-level Escape (top-of-stack), and Tab wrapping inside the panel.
@@ -262,7 +297,7 @@ export function ExtensionDialog({
       // selects that option, which silently overwrites what the user typed in
       // "Other". Prefer the first text entry, then any button.
       const target = panel.querySelector<HTMLElement>(
-        "input:not([type=radio]):not([type=checkbox]), textarea, button:not([disabled])",
+        `${TEXT_ENTRY}, button:not([disabled])`,
       );
       (target ?? panel).focus();
     });
@@ -271,15 +306,15 @@ export function ExtensionDialog({
 
   const submitValue = () => {
     if (request.method === "confirm") {
-      onRespond(request, { confirmed: true });
+      respond({ confirmed: true });
     } else if (request.method === "select") {
-      if (selectedOption) onRespond(request, { value: selectedOption });
+      if (selectedOption) respond({ value: selectedOption });
     } else if (request.method === "ask") {
       if (!canSubmit) return;
-      onRespond(request, {
+      respond({
         answers: request.questions.map((question, index) => {
           const draft = askDraftAt(index);
-          const customInput = draft.other.trim();
+          const customInput = draft.otherChosen ? draft.other.trim() : "";
           return {
             id: question.id,
             selectedOptions: question.options.map((option) => option.label).filter((label) => draft.selected.includes(label)),
@@ -288,7 +323,7 @@ export function ExtensionDialog({
         }),
       });
     } else {
-      onRespond(request, { value });
+      respond({ value });
     }
   };
 
@@ -317,6 +352,21 @@ export function ExtensionDialog({
         aria-modal={attached ? undefined : "true"}
         aria-label={title}
         tabIndex={-1}
+        // While a text box in the panel has focus, a tap elsewhere in it (an
+        // option, Cancel, Submit) must not move focus on press: the phone
+        // keyboard would close and the panel resize before the click, so the
+        // tap misses its target. A tapped option label still focuses its radio
+        // once the click lands, so the keyboard closes after the choice.
+        // Touch and pen only, judged per press (a hybrid laptop has both): a
+        // mouse keeps text selection and radio arrow keys.
+        onPointerDown={(event) => { pressPointerRef.current = event.pointerType; }}
+        onMouseDown={(event) => {
+          const target = event.target as Element;
+          const pointer = pressPointerRef.current;
+          if (pointer && pointer !== "mouse" && document.activeElement?.matches(TEXT_ENTRY) && event.currentTarget.contains(document.activeElement) && !target.closest(TEXT_ENTRY)) {
+            event.preventDefault();
+          }
+        }}
         className={attached ? undefined : "animate-scale-in"}
         style={{
           width: attached ? "100%" : "min(560px, 100%)",
@@ -353,7 +403,7 @@ export function ExtensionDialog({
                 return (
                   <button
                     key={option}
-                    onClick={() => attached ? setSelectedOption(option) : onRespond(request, { value: option })}
+                    onClick={() => attached ? setSelectedOption(option) : respond({ value: option })}
                     aria-pressed={attached ? selected : undefined}
                     style={{
                       width: "100%",
@@ -430,6 +480,10 @@ export function ExtensionDialog({
             <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 16 }}>
               {request.questions.map((question, index) => {
                 const draft = askDraftAt(index);
+                const chooseKeptOther = () => {
+                  if (draft.otherChosen || !draft.other.trim()) return;
+                  updateAskDraft(index, (current) => ({ ...current, selected: question.multi ? current.selected : [], otherChosen: true }));
+                };
                 return (
                   <fieldset key={question.id} style={{ margin: 0, padding: 0, border: "none", minWidth: 0, display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 8 }}>
                     <legend style={{ padding: 0, marginBottom: 8, color: "var(--text)", fontSize: 13, fontWeight: 600, lineHeight: 1.5 }}>
@@ -463,9 +517,15 @@ export function ExtensionDialog({
                             type={question.multi ? "checkbox" : "radio"}
                             name={`ask-${request.id}-${index}`}
                             checked={checked}
-                            onChange={() => setAskDrafts((drafts) => drafts.map((current, i) => i !== index ? current : question.multi
-                              ? { ...current, selected: current.selected.includes(option.label) ? current.selected.filter((label) => label !== option.label) : [...current.selected, option.label] }
-                              : { selected: [option.label], other: "" }))}
+                            onChange={(event) => {
+                              // A tap on the radio itself, unlike one on its label, does
+                              // not focus it once the press keeps focus in Other. Focus it
+                              // so the keyboard closes and further typing cannot pick Other.
+                              event.currentTarget.focus();
+                              updateAskDraft(index, (current) => question.multi
+                                ? { ...current, selected: current.selected.includes(option.label) ? current.selected.filter((label) => label !== option.label) : [...current.selected, option.label] }
+                                : { ...current, selected: [option.label], otherChosen: false });
+                            }}
                             style={{ margin: "2px 0 0", accentColor: "var(--accent-strong)" }}
                           />
                           <span style={{ minWidth: 0, overflowWrap: "anywhere" }}>
@@ -483,48 +543,71 @@ export function ExtensionDialog({
                         </label>
                       );
                     })}
-                    <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                    {/* The Other option: its text box is the option, so what was
+                        typed stays in place while another option is chosen. */}
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "flex-start",
+                        gap: 8,
+                        minWidth: 0,
+                        padding: "8px 10px",
+                        borderRadius: 7,
+                        border: `1px solid ${draft.otherChosen ? "var(--accent)" : "var(--border)"}`,
+                        background: draft.otherChosen ? "color-mix(in srgb, var(--accent) 10%, var(--bg-panel))" : "var(--bg-panel)",
+                      }}
+                    >
+                      <input
+                        type={question.multi ? "checkbox" : "radio"}
+                        name={`ask-${request.id}-${index}`}
+                        aria-label={t("chatWindow.askOther")}
+                        checked={draft.otherChosen}
+                        onChange={(e) => {
+                          const chosen = e.target.checked;
+                          updateAskDraft(index, (current) => ({ ...current, selected: chosen && !question.multi ? [] : current.selected, otherChosen: chosen }));
+                          if (chosen) document.getElementById(`ask-${request.id}-${index}-other`)?.focus();
+                        }}
+                        style={{ margin: "4px 0 0", accentColor: "var(--accent-strong)", cursor: "pointer" }}
+                      />
                       <textarea
+                        id={`ask-${request.id}-${index}-other`}
                         aria-label={t("chatWindow.askOther")}
                         placeholder={t("chatWindow.askOther")}
                         value={draft.other}
-                        rows={2}
+                        // Going back into kept text means answering with it again.
+                        // A tap counts too: unticking Other by touch keeps focus in
+                        // this box, so tapping back into it fires no focus event.
+                        onFocus={chooseKeptOther}
+                        onClick={chooseKeptOther}
+                        rows={1}
                         onChange={(e) => {
                           const other = e.target.value;
-                          setAskDrafts((drafts) => drafts.map((current, i) => i === index ? { selected: question.multi ? current.selected : [], other } : current));
+                          // Typing chooses Other (replacing a single-select choice);
+                          // clearing it unchooses, so a blank answer never blocks Submit.
+                          updateAskDraft(index, (current) => other.trim()
+                            ? { selected: question.multi ? current.selected : [], other, otherChosen: true }
+                            : { ...current, other, otherChosen: false });
                         }}
                         onKeyDown={(e) => {
                           if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submitValue();
                         }}
                         style={{
-                          width: "100%",
-                          boxSizing: "border-box",
+                          flex: 1,
                           minWidth: 0,
-                          padding: "8px 10px",
-                          borderRadius: 7,
-                          border: "1px solid var(--border)",
-                          background: "var(--bg-panel)",
-                          color: "var(--text)",
+                          padding: 0,
+                          border: "none",
+                          background: "none",
+                          color: draft.otherChosen ? "var(--text)" : "var(--text-muted)",
                           outline: "none",
-                          resize: "vertical",
+                          resize: "none",
                           fontSize: "var(--chat-font-size)",
                           lineHeight: 1.55,
                           fontFamily: "inherit",
+                          fieldSizing: "content",
+                          minHeight: "1.55em",
+                          maxHeight: 200,
                         }}
                       />
-                      {keyboardOpen && (
-                        <button
-                          type="button"
-                          onClick={submitValue}
-                          disabled={!canSubmit}
-                          title={t("chatWindow.askSubmitAnswer")}
-                          aria-label={t("chatWindow.askSubmitAnswer")}
-                          className="extension-dialog-send"
-                          style={inlineSubmitStyle(!canSubmit, touchTargets === "accessible")}
-                        >
-                          <SendHorizontal size={15} strokeWidth={2} aria-hidden="true" />
-                        </button>
-                      )}
                     </div>
                   </fieldset>
                 );

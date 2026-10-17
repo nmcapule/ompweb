@@ -2,6 +2,8 @@ import { useEffect, useRef, useSyncExternalStore } from "react";
 import { toast } from "@/components/ui/toast";
 import { translate } from "@/lib/i18n";
 import { DEFAULT_NOTIFICATION_PREFS, renderNotification, type NotificationEvent, type RenderedNotification } from "@/lib/notification-events";
+import { notificationHistory } from "@/lib/notification-history";
+import { isRecord } from "@/lib/type-guards";
 import {
   ensurePushSubscription,
   getNotificationDeviceId,
@@ -99,18 +101,35 @@ export function useNotifications({ sessionId, locale, onOpenSession }: { session
     })().catch(() => {});
   }, []);
 
+  // The persisted Notifications list: loaded now and whenever the tab comes back, which brings read marks and removals from other devices.
+  useEffect(() => {
+    void notificationHistory.load();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void notificationHistory.load();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
+
   // Delivery to this tab and notification clicks.
   useEffect(() => {
-    // The whole card opens the session (click, tap, or Enter on the focused card); no separate Open link.
     const showToast = (rendered: RenderedNotification, type: NotificationEvent["type"]) => {
-      const target = rendered.sessionId;
       const show = type === "error" ? toast.error : toast.info;
-      show(rendered.title, rendered.body, { id: rendered.tag, onClick: target ? () => openRef.current(target) : undefined });
+      const target = rendered.sessionId;
+      // The whole card opens the session (click, tap, or Enter on the focused card); following it is reading it.
+      show(rendered.title, rendered.body, {
+        id: rendered.tag,
+        onClick: target ? () => {
+          notificationHistory.markRead(rendered.tag);
+          openRef.current(target);
+        } : undefined,
+      });
     };
     const onMessage = (raw: Event) => {
       if (!(raw instanceof CustomEvent)) return;
-      // Sent by SessionSidebar from our own SSE stream.
+      // Sent by SessionSidebar from our own SSE stream. The server has already recorded it.
       const { kind, event }: { kind: "toast" | "os"; event: NotificationEvent } = raw.detail;
+      notificationHistory.add(event);
       const rendered = renderNotification(event, translate);
       if (kind === "toast") {
         showToast(rendered, event.type);
@@ -126,9 +145,13 @@ export function useNotifications({ sessionId, locale, onOpenSession }: { session
     };
     const onWorkerMessage = (message: MessageEvent) => {
       const data: unknown = message.data;
-      if (data && typeof data === "object" && "type" in data && data.type === "omp-open-session" && "sessionId" in data && typeof data.sessionId === "string") {
+      if (!isRecord(data)) return;
+      if (data.type === "omp-open-session" && typeof data.sessionId === "string") {
         openRef.current(data.sessionId);
+        return;
       }
+      // A push the service worker showed while this tab was open: the server recorded it; fetch the list.
+      if (data.type === "omp-notification-shown") void notificationHistory.load();
     };
     window.addEventListener(NOTIFICATION_MESSAGE_EVENT, onMessage);
     window.addEventListener(OPEN_SESSION_EVENT, onOpen);

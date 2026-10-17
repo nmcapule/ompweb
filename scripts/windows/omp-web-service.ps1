@@ -96,6 +96,17 @@ function Test-ServerHealth {
     } catch { return $false }
 }
 
+# Copy an omp-web credential from the user (then system) environment into the
+# child, or remove it there. This launcher's own environment was captured at
+# logon, so a value changed or removed with `setx` since then must not survive
+# a server restart: the old password would keep working after rotation.
+function Set-ChildCredential($psi, [string]$name) {
+    $value = [Environment]::GetEnvironmentVariable($name, "User")
+    if ([string]::IsNullOrEmpty($value)) { $value = [Environment]::GetEnvironmentVariable($name, "Machine") }
+    if ([string]::IsNullOrEmpty($value)) { $psi.EnvironmentVariables.Remove($name) } else { $psi.EnvironmentVariables[$name] = $value }
+    return $value
+}
+
 function Start-WebServer {
     if ($script:ChildProcess -and !$script:ChildProcess.HasExited) { return }
     Write-ServiceLog "Starting web server in $EffectiveMode mode on ${EffectiveHostname}:$EffectivePort..."
@@ -126,17 +137,14 @@ function Start-WebServer {
     $psi.EnvironmentVariables["OMP_WEB_HOSTNAME"] = [string]$EffectiveHostname
     $psi.EnvironmentVariables["OMP_WEB_SERVICE"] = "1"
     $psi.EnvironmentVariables["PORT"] = [string]$EffectivePort
-    # Pass the password hash explicitly: bin/omp-web.js refuses a non-loopback
-    # bind without one, and an inherited environment block can be stale. A
-    # plaintext password is hashed here and never forwarded as-is.
-    $childHash = [Environment]::GetEnvironmentVariable("OMP_WEB_PASSWORD_HASH", "Process")
+    # bin/omp-web.js refuses a non-loopback bind without a password hash. A
+    # plaintext OMP_WEB_PASSWORD is passed through only so the server can refuse
+    # it with instructions; generate a hash with `ompweb hash-password`.
+    $childHash = Set-ChildCredential $psi "OMP_WEB_PASSWORD_HASH"
+    $null = Set-ChildCredential $psi "OMP_WEB_PASSWORD"
+    $null = Set-ChildCredential $psi "OMP_WEB_TRUSTED_HEADER_SHA256"
     if ([string]::IsNullOrEmpty($childHash)) {
-        $childHash = [Environment]::GetEnvironmentVariable("OMP_WEB_PASSWORD_HASH", "User")
-    }
-    if (![string]::IsNullOrEmpty($childHash)) {
-        $psi.EnvironmentVariables["OMP_WEB_PASSWORD_HASH"] = $childHash
-    } else {
-        Write-ServiceLog "WARN: OMP_WEB_PASSWORD_HASH not found in the process or user environment; a non-loopback bind will be refused by bin/omp-web.js (generate one with: ompweb hash-password)"
+        Write-ServiceLog "WARN: OMP_WEB_PASSWORD_HASH not found in the user or system environment; a non-loopback bind will be refused by bin/omp-web.js (generate one with: ompweb hash-password)"
     }
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi

@@ -526,6 +526,9 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   });
   useEffect(() => {
     if (!autoplayPendingRef.current) return;
+    // A held reply is about to become its saved row: speak that one, so the
+    // row's own speaker button shows it playing and can stop it.
+    if (!streamState.isStreaming && streamState.streamingMessage) return;
     autoplayPendingRef.current = false;
     const speech = assistantSpeech(messages, entryIds, streamState.streamingMessage);
     if (speech) ttsRef.current.speak(speech.id, speech.text);
@@ -670,8 +673,11 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   // True while the viewport is at/near the conversation bottom. Drives the
   // anchored render window in CommittedTranscript.
   const [nearBottom, setNearBottom] = useState(true);
+  // The empty new-session screen has its own scroller, so the conversation's
+  // scroller mounts after the first send without a remount or a load.
+  const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
   useEffect(() => {
-    if (loading) return;
+    if (loading || isEmptyNew) return;
     const el = scrollContainerRef.current;
     if (!el) return;
     let raf: number | null = null;
@@ -683,13 +689,24 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     const onScroll = () => {
       if (raf === null) raf = requestAnimationFrame(update);
     };
+    // A scroller that shrinks (the phone keyboard opening, the composer or an
+    // ask panel growing) keeps its top edge, so the newest messages slide
+    // under the composer. Keep a reader whose old view reached the bottom there.
+    let height = el.clientHeight;
+    const resize = new ResizeObserver(() => {
+      const wasAtBottom = el.scrollTop + height >= el.scrollHeight - 96;
+      height = el.clientHeight;
+      if (wasAtBottom) el.scrollTop = el.scrollHeight;
+    });
     update();
     el.addEventListener("scroll", onScroll, { passive: true });
+    resize.observe(el);
     return () => {
       el.removeEventListener("scroll", onScroll);
+      resize.disconnect();
       if (raf !== null) cancelAnimationFrame(raf);
     };
-  }, [loading, scrollContainerRef]);
+  }, [loading, isEmptyNew, scrollContainerRef]);
   const scrollToBottom = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
@@ -887,7 +904,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     return agentPhase.tools.filter((tool) => !renderedIds.has(tool.id));
   }, [agentPhase, committedToolCallIds, streamState.streamingMessage]);
 
-  const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
   // Reset minimized state on session switch (session-scoped)
   useEffect(() => { setComposerMinimized(false); }, [sessionKeyForPaging]);
   // The extension dialog renders inside the collapsible composer wrapper;
@@ -1008,7 +1024,15 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     return null;
   }, [bashRunning, pendingBash, isCompacting, agentRunning, streamState.streamingMessage, pendingToolHeaders.length, agentPhase, activeSubagentCount, currentTodoPhase, t, tn]);
 
-
+  const askOpen = extensionDialog?.method === "ask";
+  const hiddenComposerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    // A hidden composer that keeps focus keeps the phone keyboard up: the
+    // first tap in the ask panel would then close it, resize the panel and
+    // miss its target. Let the keyboard go when the composer hides.
+    const active = document.activeElement;
+    if (askOpen && active instanceof HTMLElement && hiddenComposerRef.current?.contains(active)) active.blur();
+  }, [askOpen]);
   const chatInputElement = (
     <ChatInput
       ref={chatInputRef}
@@ -1288,7 +1312,9 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
               sentinelRef={sentinelRef}
               handleLoadMoreClick={handleLoadMoreClick}
             />
-            {streamState.isStreaming && streamState.streamingMessage && (
+            {/* Also while held: a finished reply stays until its saved row
+                replaces it in the same render (useAgentSession-stream). */}
+            {streamState.streamingMessage && (
               <MessageView
                 key={streamState.streamingMessage.timestamp ?? "stream"}
                 message={streamState.streamingMessage as AgentMessage}
@@ -1299,7 +1325,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
                 toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
                 expandThinkingByDefault={expandThinkingByDefault}
                 hideThinking={hideThinkingBlock}
-                liveTokensPerSecond={tokensPerSecond}
+                liveTokensPerSecond={streamState.isStreaming ? tokensPerSecond : undefined}
               />
             )}
 
@@ -1433,7 +1459,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
             <ExtensionWidgets widgets={belowEditorWidgets} />
           </div>
         </div>
-        {chatInputElement}
+        {/* An open ask is answered (or cancelled) in its panel; hiding the
+            composer leaves no doubt where to type. Kept mounted so the
+            draft, attachments and a recording survive. */}
+        <div ref={hiddenComposerRef} style={{ display: askOpen ? "none" : "contents" }}>{chatInputElement}</div>
       </div>
       </>
       )}

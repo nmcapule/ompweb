@@ -21,6 +21,14 @@ export interface NotificationEvent {
   aliases?: string[];
 }
 
+/** One entry of the persisted notification history; `id` is the replace-tag `<sessionId>:<type>`. */
+export interface NotificationHistoryEntry {
+  id: string;
+  event: NotificationEvent;
+  at: number;
+  read: boolean;
+}
+
 export interface NotificationPrefs {
   enabled: boolean;
   types: Record<NotificationType, boolean>;

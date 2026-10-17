@@ -19,13 +19,16 @@ const HOST_RUNTIME_NAMES: readonly string[] = ["PORT", "NODE_ENV"];
 
 /**
  * omp-web secrets. `OMP_WEB_PASSWORD` is the legacy plaintext (still listed so
- * a dev server started from an old .env cannot leak it); the others are the
+ * a dev server started from an old .env cannot leak it), and
+ * `OMP_WEB_TRUSTED_HEADER_SECRET` is the pre-digest name of the trusted-proxy
+ * secret, which an old service env file may still carry; the others are the
  * values that grant access to this server.
  */
 export const OMP_WEB_SECRET_ENV_VARS: readonly string[] = [
   "OMP_WEB_PASSWORD",
   "OMP_WEB_PASSWORD_HASH",
   "OMP_WEB_TRUSTED_HEADER_SECRET",
+  "OMP_WEB_TRUSTED_HEADER_SHA256",
 ];
 
 /** Prefixes that never reach a child process. */

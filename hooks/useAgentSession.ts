@@ -474,6 +474,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setData((current) => current ? { ...current, context } : current);
         if (metadata) syncActionsRef.current?.metadata(context, metadata.version, metadata.hasLive);
         if (!agentRunningRef.current) setTodoPhases(context.todoPhases ?? []);
+        // Hand a held reply over to its saved copy in the same render.
+        dispatch({ type: "release", committed: context.messages });
         setActiveLeafId(leafId);
         const previous = runPreviousEntryIdsRef.current && new Set(runPreviousEntryIdsRef.current);
         if (previous && context.messages.some((message, i) => message.role === "user" && !previous.has(context.entryIds[i]))) {
@@ -497,8 +499,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * inline chat error banner (MessageView) instead of toast-only. No-op when
    * nothing is streaming. */
   const surfaceQuotaOnStream = useCallback((errorMessage: string) => {
-    const current = streamStateRef.current.streamingMessage;
-    if (!current || current.role !== "assistant") return;
+    const { isStreaming, streamingMessage: current } = streamStateRef.current;
+    // A held (finished) reply is no live bubble: stamping it would start a
+    // stream again and keep it on screen beside its saved copy.
+    if (!isStreaming || !current || current.role !== "assistant") return;
     if (typeof current.errorMessage === "string" && current.errorMessage.trim()) return;
     dispatch({
       type: "update",
@@ -2263,7 +2267,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             }, 1000);
           }
         }
-        dispatch({ type: "reset" });
+        // A finished reply stays until the catch-up above commits its saved
+        // copy (history callback). Tool-call turns still clear at once: their
+        // rows and status line come from the live tool state instead. A
+        // past-branch view never receives the saved copy, so it never holds.
+        const finishedReply = completed?.role === "assistant"
+          && !catchUp.view().leafId
+          && hasVisibleAssistantContent(completed)
+          && !(Array.isArray(completed.content) && completed.content.some((block) => block?.type === "toolCall"));
+        dispatch(finishedReply ? { type: "hold", message: normalizeToolCalls(completed) } : { type: "idle", streaming: false });
         setAgentPhase({ kind: "waiting_model" });
         break;
       }
@@ -2569,7 +2581,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (fields.message) {
         dispatch(snapshot.streamingMessage
           ? { type: "update", message: normalizeToolCalls(snapshot.streamingMessage as AgentMessage) }
-          : snapshot.isStreaming ? { type: "start" } : { type: "reset" });
+          // Between message_end and its saved copy the server has no message:
+          // a held reply stays.
+          : { type: "idle", streaming: snapshot.isStreaming });
         if (!promptDispatchPendingRef.current && hasVisibleAssistantContent(snapshot.streamingMessage)) runHadContentRef.current = true;
         const messageError = readAgentError(snapshot.streamingMessage);
         if (messageError) lastRunErrorRef.current = messageError;

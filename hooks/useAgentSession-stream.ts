@@ -18,7 +18,6 @@ import type {
   SubagentProgress,
 } from "@/lib/subagent-types";
 import { translate } from "@/lib/i18n";
-import { toastHistory } from "@/components/ui/toast";
 import type { SessionStreamCursor } from "@/lib/session-sync";
 
 export interface SessionData {
@@ -43,6 +42,14 @@ export interface StreamingState {
 export type StreamAction =
   | { type: "start" }
   | { type: "update"; message: Partial<AgentMessage> }
+  /** A finished reply stays on screen until the saved transcript shows it:
+   * dropping it first empties that space for a moment, so the chat jumps up
+   * and back down. `release`, a new stream (`start`, `update`) or `reset`
+   * takes it away; `end` and `idle` leave it. */
+  | { type: "hold"; message: Partial<AgentMessage> }
+  | { type: "release"; committed: readonly AgentMessage[] }
+  /** No message is streaming now (a message ended, a live snapshot has none). */
+  | { type: "idle"; streaming: boolean }
   | { type: "end" }
   | { type: "reset" };
 
@@ -52,7 +59,22 @@ export function streamReducer(state: StreamingState, action: StreamAction): Stre
       return { isStreaming: true, streamingMessage: null };
     case "update":
       return { isStreaming: true, streamingMessage: action.message };
-    case "end":
+    case "hold":
+      return { isStreaming: false, streamingMessage: action.message };
+    case "release": {
+      const held = state.isStreaming ? null : state.streamingMessage;
+      if (!held) return state;
+      // No timestamp to match: drop it now, as before holding existed.
+      const saved = held.timestamp === undefined
+        || action.committed.some((message) => message.role === "assistant" && message.timestamp === held.timestamp);
+      return saved ? { isStreaming: false, streamingMessage: null } : state;
+    }
+    case "idle":
+    case "end": {
+      const held = !state.isStreaming && state.streamingMessage;
+      if (held) return state;
+      return { isStreaming: action.type === "idle" && action.streaming, streamingMessage: null };
+    }
     case "reset":
       return { isStreaming: false, streamingMessage: null };
     default:
@@ -331,8 +353,6 @@ export async function runHostTool(
     case "notify": {
       const title = str(args.title) ?? "OMP";
       const message = str(args.message) ?? "";
-      // Logged even when the OS blocks notifications, so the message is never lost.
-      toastHistory.record("info", title, message || undefined);
       if (typeof Notification !== "undefined") {
         try {
           const permission = Notification.permission === "default" ? await Notification.requestPermission() : Notification.permission;

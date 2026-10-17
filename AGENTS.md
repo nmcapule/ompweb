@@ -68,6 +68,7 @@ app/api/
   notifications/devices/route.ts  GET VAPID key + subscribed | PUT { deviceId, prefs, subscription? }
   notifications/presence/route.ts POST { clientId, deviceId, visible, sessionId, seq }
   notifications/test/route.ts     POST { deviceId } send a test push (502 on push-service refusal)
+  notifications/history/route.ts  GET entries | PATCH { ids } mark read | DELETE ?id= remove one, ?all=1 clear
   auth/**                         provider list, login/logout, API keys (via RPC)
   cwd/validate/route.ts           POST validate/select a cwd
   default-cwd/route.ts            POST create ~/omp-cwd-YYYYMMDD
@@ -110,8 +111,10 @@ lib/
   project-command-env.ts  child-process environments: strips PORT/NODE_ENV/NEXT_* and omp-web's secrets
   project-ordering.ts  pure project sort/group/activity helpers (client + tests)
   project-registry.ts  on-disk managed-project registry (~/.omp/agent/projects.json)
-  notification-events.ts  shared: event/prefs types, frame→event detector, renderNotification()
-  notification-hub.ts  server: presence, device store + VAPID keys, routing, Web Push
+  notification-events.ts  shared: event/prefs/history-entry types, frame→event detector, renderNotification()
+  notification-hub.ts  server: presence, routing, Web Push, recording published notifications
+  notification-store.ts  server: SQLite store for VAPID keys, devices and the notification history
+  notification-history.ts  browser: mirror of the server's notification history (Notifications tab)
   notification-client.ts  browser: device id, prefs store, service worker + push subscription
   rpc-manager.ts       session registry + startRpcSession over RpcProcess
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
@@ -141,7 +144,7 @@ components/
   CommandPalette.tsx  ⌘K/Ctrl+K palette (cmdk): session switch, new session, theme
   ImageLightbox.tsx   click-to-preview lightbox for chat images (ClickableImage)
   BranchNavigator.tsx in-session branch switcher
-  NotificationList.tsx right-panel Notifications tab: in-memory history of toasts + OS notifications (`toastHistory`)
+  NotificationList.tsx right-panel Notifications tab: the persisted notification history (`lib/notification-history.ts`)
   ChatMinimap.tsx     scroll minimap alongside the message list
   MarkdownBody.tsx    markdown renderer
   ModelsConfig.tsx    modal for models/auth configuration
@@ -517,6 +520,11 @@ during the wait.
 - A manual scroll-up sets `completionScrollAllowedRef = false` and disables
   following until the next prompt; `scrollUserMsgToTop` handles the
   pending-scroll after sending.
+- A `ResizeObserver` on the chat scroller (`ChatWindow`, beside `nearBottom`)
+  keeps a reader whose previous view reached the bottom there when the
+  scroller changes height (phone keyboard, composer or ask panel growing). It
+  judges by the previous height, so content that grew below the reader (an
+  expanded tool call) does not count as being at the bottom.
 - Programmatic smooth scrolling must respect `prefers-reduced-motion`
   (`usePrefersReducedMotion` in `hooks/usePrefersReducedMotion.ts` — also the
   only way to stop SVG SMIL animations, which CSS cannot).
@@ -675,9 +683,12 @@ during the wait.
   while Settings is open, so that tab gets no toasts then; it also stops
   counting as active, so other devices are not silenced.
 - Prefs and push subscriptions are per device, in `localStorage` and mirrored to
-  `~/.omp/agent/omp-web/notifications.json` (mode 0600; also holds the VAPID
-  private key). The server reads that file on every use, never caching it: an
-  installed server and `npm run dev` can share the agent dir. Push text is
+  the SQLite notification store in omp-web's data dir
+  (`lib/notification-store.ts`, server-only; mode 0600 because it also holds
+  the VAPID private key; WAL with a busy timeout). It also keeps the
+  notification history. An installed server and `npm run dev` sharing the agent
+  dir share it safely; the first open imports and deletes the old
+  `notifications.json`. Push text is
   rendered server-side in the device's locale. Browsers with saved settings (enabled or not) sync on load; never-configured browsers do not.
 - A crash notifies "Run failed" while a run is live or while background work
   started by it has not settled yet (`unsettled`, cleared by `session_settled`).
@@ -690,6 +701,25 @@ during the wait.
   to `/login?next=/?session=…`, and `LoginForm` returns there (only `/?…`
   targets are accepted). The worker navigates non-app windows to the session
   URL; the app falls back to that URL when `/api/sessions` cannot be read.
+
+## Git history and PR landing rules
+
+- **Never rewrite `main`'s history** — no force-push, `filter-branch`, rebase
+  of already-pushed commits, or `reset --hard` followed by a force-push — unless
+  the user explicitly asks for exactly that, after being told what it affects
+  (every rewritten commit gets a new hash, forks and clones diverge). A cosmetic
+  flaw such as a badly worded commit title is not worth it; leave it.
+- Never push or rewrite someone else's branch. Contributors' commits keep their
+  original hashes and authorship.
+- Land PRs with a squash or rebase merge so each change is one commit with a
+  normal title (`fix(scope): ...`, matching the surrounding log). Do not create
+  throwaway integration branches (`scratch`, `pr-NNN`) and merge PR branches
+  into them: git's auto-titles (`Merge branch 'pr-200' into scratch`) end up in
+  the permanent history. If PRs conflict with each other (usually
+  `CHANGELOG.md`), ask the authors to rebase, or resolve on a properly named
+  branch and write real commit messages.
+- Before merging a PR: CI green on the current head, mergeable, and diff read.
+  Pass the head SHA to the merge so a late push is not merged unseen.
 
 ## omp Session File Format (v3)
 
@@ -736,12 +766,26 @@ motion: --dur-fast (150ms) --dur-med (220ms) --dur-slow (320ms) --ease-out-warm
 
 `components/ui/` holds the shared primitives (built on `@base-ui/react`):
 `primitives.tsx` (Dialog/Tooltip/Collapsible), `field.tsx` (form fields +
-ConfirmDialog), `toast.tsx` (`toast.success/error/info`, mounted in AppShell;
-every toast also lands in `toastHistory`, the last 100 kept in memory for the
-right panel's Notifications tab; OS notifications call `toastHistory.record()`
-so they appear there too). Unread entries badge the right-panel toggle, which
-then opens the Notifications tab; entries become read when the user leaves
-that tab or uses Mark all as read. Toasts and Notifications entries dismiss on
+ConfirmDialog), `toast.tsx` (`toast.success/error/info`, mounted in AppShell).
+Toasts are not stored. The right panel's Notifications tab lists the server's
+notification history (`lib/notification-history.ts`, a mirror of
+`/api/notifications/history`): `publishNotification` records every
+notification type some device has turned on (completed, input, error, model
+switch), whether or not any tab or push receives it, already read when a
+visible tab shows that session; the newest 100, so entries survive reloads and restarts and
+every device sees the same list. The mirror loads on mount and when the tab
+becomes visible (read marks and removals from other devices), adds events this
+tab receives over SSE without a refetch, and reloads when the service worker
+reports a push it showed. Entries store the `NotificationEvent` and render in
+the viewer's language; clicking one, or Enter, marks it read and opens its
+session (`OPEN_SESSION_EVENT`).
+Unread entries badge the right-panel toggle, which then opens the Notifications
+tab; entries become read when the user leaves that tab (only the entries it
+showed), uses Mark all as read, or opens the notification from its toast or
+row, and a reused id (`<sessionId>:<type>`) is unread again. Mark-read, remove
+and clear update the list at once, then the server; a failed request reloads
+it. Unread rows show a leading accent dot and a bold title; read
+rows are dimmed. Toasts and Notifications entries dismiss on
 a sideways touch/pen swipe (base-ui's toast swipe; `NotificationRow` for the
 list) and carry `data-swipe-dismiss`, which the mobile sidebar gesture skips.
 `useDragClickGuard` swallows the click that ends any drag on them, judged by

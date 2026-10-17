@@ -23,7 +23,7 @@ import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { GitChangesPanel } from "./GitChangesPanel";
 import { FileViewer } from "./FileViewer";
 import { NotificationList } from "./NotificationList";
-import { toastHistory, useUnreadToastCount } from "./ui/toast";
+import { notificationHistory, useUnreadNotificationCount } from "@/lib/notification-history";
 import { WorktreesPanel } from "./WorktreesPanel";
 import type { WorktreeContext } from "./SessionSidebar-helpers";
 import { useI18n } from "@/lib/i18n";
@@ -131,7 +131,7 @@ export const RightPanel = memo(function RightPanel({
   const { t } = useI18n();
   const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;
   const gitBadge = explorerIsRepo ? explorerGitCount : 0;
-  const unreadNotifications = useUnreadToastCount();
+  const unreadNotifications = useUnreadNotificationCount();
   const [visitedViews, setVisitedViews] = useState<Set<RightPanelView>>(() => new Set(["explorer"]));
   useEffect(() => {
     setVisitedViews((previous) => {
@@ -280,7 +280,7 @@ export const RightPanel = memo(function RightPanel({
             <div style={{ display: "flex", alignItems: "center", flexShrink: 0, padding: "0 2px" }} role="toolbar" aria-label={t("appShell.notifications")}>
               {/* aria-disabled (not disabled) keeps the button focusable after use. */}
               <button
-                onClick={toastHistory.markAllRead}
+                onClick={notificationHistory.markAllRead}
                 aria-disabled={unreadNotifications === 0}
                 title={t("appShell.notificationsMarkRead")}
                 aria-label={t("appShell.notificationsMarkRead")}
@@ -292,7 +292,7 @@ export const RightPanel = memo(function RightPanel({
                 <CheckCheck size={13} strokeWidth={2} aria-hidden="true" />
               </button>
               <button
-                onClick={toastHistory.clear}
+                onClick={notificationHistory.clear}
                 title={t("appShell.notificationsClear")}
                 aria-label={t("appShell.notificationsClear")}
                 className="ui-focus-ring"

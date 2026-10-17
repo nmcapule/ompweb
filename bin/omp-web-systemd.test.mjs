@@ -164,6 +164,7 @@ test("install creates the env file and unit with LAN settings", { skip: process.
       OMP_WEB_HOSTNAME: "0.0.0.0",
       OMP_WEB_PASSWORD: "test-password",
       OMP_WEB_NO_OPEN: "0",
+      OMP_WEB_TRUSTED_HEADER_SHA256: "a".repeat(64),
       OMP_WEB_DISABLE_AUTOUPDATE: "1",
       OMP_WEB_NAME: "My Box",
       PORT: "40123",
@@ -193,6 +194,7 @@ test("install creates the env file and unit with LAN settings", { skip: process.
       OMP_WEB_NO_OPEN: "0",
       OMP_WEB_DISABLE_AUTOUPDATE: "1",
       OMP_WEB_NAME: "My Box",
+      OMP_WEB_TRUSTED_HEADER_SHA256: "a".repeat(64),
     });
     assert.match(readFileSync(unitPath, "utf8"), /EnvironmentFile=.*web-service\.env/);
     assert.match(result.stdout, /config:.*web-service\.env/);

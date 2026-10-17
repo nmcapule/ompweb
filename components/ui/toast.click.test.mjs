@@ -11,6 +11,7 @@ const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tryNat
 const { ClampedDescription, ToastProvider, toast } = await jiti.import("@/components/ui/toast");
 const { useNotifications } = await jiti.import("@/hooks/useNotifications");
 const { NOTIFICATION_MESSAGE_EVENT } = await jiti.import("@/lib/notification-client");
+const { notificationHistory } = await jiti.import("@/lib/notification-history");
 
 before(() => {
   globalThis.AbortController = window.AbortController;
@@ -73,6 +74,7 @@ test("buttons, links, expandable text, drags and text selection do not trigger t
   window.getSelection().selectAllChildren(title);
   act(() => title.click());
   assert.equal(opened.length, 0);
+  assert.equal(card()?.hasAttribute("data-ending-style") ?? false, false);
 });
 
 test("a toast without an action keeps the default cursor", () => {
@@ -98,8 +100,60 @@ test("a session notification toast opens its session from a card click; one with
   assert.equal(withSession.querySelectorAll("button:not(.toast-close-button), a").length, 0);
   act(() => withSession.querySelector(".display-serif").click());
   assert.deepEqual(sessions, ["s1"]);
+  // Session notifications are listed; opening one from its toast reads it.
+  assert.deepEqual(notificationHistory.get().filter((e) => e.id === "s1:completed").map((e) => e.read), [true]);
   const withoutSession = deliver("", "No session");
   assert.equal(withoutSession.style.cursor, "");
   act(() => withoutSession.querySelector(".display-serif").click());
   assert.deepEqual(sessions, ["s1"]);
+});
+
+test("a notification the OS showed is listed in history", async () => {
+  const created = [];
+  // Bare `Notification` in the code under test resolves to the global, not window.
+  globalThis.Notification = window.Notification = class { static permission = "granted"; constructor(title) { created.push(title); } };
+  try {
+    renderHook(() => useNotifications({ sessionId: null, locale: "en", onOpenSession: () => {} }));
+    await act(async () => {
+      window.dispatchEvent(new window.CustomEvent(NOTIFICATION_MESSAGE_EVENT, { detail: { kind: "os", event: { type: "error", sessionId: "s9", sessionName: "Shown by OS", detail: "boom" } } }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.deepEqual(created, ["Shown by OS"]);
+    assert.deepEqual(notificationHistory.get().filter((e) => e.id === "s9:error").map((e) => [e.event.sessionName, e.read]), [["Shown by OS", false]]);
+  } finally {
+    delete window.Notification;
+    delete globalThis.Notification;
+    act(() => notificationHistory.clear());
+  }
+});
+
+test("a push the service worker showed reloads the list from the server; other messages are ignored", async () => {
+  const worker = new window.EventTarget();
+  Object.defineProperty(window.navigator, "serviceWorker", { configurable: true, value: worker });
+  const requests = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    requests.push([init.method ?? "GET", String(url)]);
+    const entries = [{ id: "s7:error", event: { type: "error", sessionId: "s7", sessionName: "Pushed" }, at: 1, read: false }];
+    return { ok: true, json: async () => ({ entries }) };
+  };
+  try {
+    renderHook(() => useNotifications({ sessionId: null, locale: "en", onOpenSession: () => {} }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    requests.length = 0;
+    const post = (data) => act(async () => {
+      worker.dispatchEvent(new window.MessageEvent("message", { data }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await post("junk");
+    await post({ type: "something-else" });
+    assert.deepEqual(requests, []);
+    await post({ type: "omp-notification-shown", notification: { type: "error", title: "Pushed", body: "Run failed", tag: "s7:error", sessionId: "s7" } });
+    assert.deepEqual(requests, [["GET", "/api/notifications/history"]]);
+    assert.deepEqual(notificationHistory.get().map((e) => e.id), ["s7:error"]);
+  } finally {
+    globalThis.fetch = previousFetch;
+    delete window.navigator.serviceWorker;
+    act(() => notificationHistory.clear());
+  }
 });

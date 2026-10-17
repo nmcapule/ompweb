@@ -27,7 +27,7 @@
 ## 环境要求
 
 - 已安装 [omp](https://github.com/can1357/oh-my-pi) 且在 `PATH` 中（或通过 `OMP_WEB_OMP_BIN` 指定路径）
-- Node.js `>= 22.19.0`
+- Node.js `>= 24`
 
 将排队的后续消息转为 **Steer** 需要 omp 运行时支持 `promote_queued_message` RPC 命令（omp 18.1.16 尚不支持）。旧版运行时会返回错误，消息仍作为后续消息排队；ompweb 不会重复发送一条引导消息。
 
@@ -63,9 +63,13 @@ ompweb --no-open                           # 不自动打开浏览器
 
 ### 密码保护
 
-omp-web **绝不读取明文密码**。设置 `OMP_WEB_PASSWORD` 或使用 `--password`
-会导致启动被拒绝：每个 `omp` 会话都会继承服务器的环境变量，智能体只要运行
-`env` 就会把密码写入会话文件并发送给模型提供商。
+omp-web **绝不把明文密码交给服务器**：每个 `omp` 会话都会继承服务器的环境变量，
+智能体只要运行 `env` 就会把密码写入会话文件并发送给模型提供商。使用
+`--password` 会导致启动被拒绝。`OMP_WEB_PASSWORD` 暂时仍可使用：`ompweb`
+会在启动时将其哈希、使其不进入服务器的环境变量，并在日志中输出警告，附上应设置为
+`OMP_WEB_PASSWORD_HASH` 的哈希值。请尽快切换：智能体仍能从 `ompweb` 启动器进程中
+读取明文，而且每次启动都会生成新的哈希，每次重启都会让所有浏览器退出登录。
+同时设置两个变量会导致启动被拒绝，请删除 `OMP_WEB_PASSWORD`。
 
 请改用哈希：
 
@@ -109,6 +113,7 @@ Windows 服务）仍在安装时接受 `OMP_WEB_PASSWORD`，但在写入配置�
 | `PORT` | 服务端口 | `30177` |
 | `OMP_WEB_HOSTNAME` | 绑定主机名 | `127.0.0.1` |
 | `OMP_WEB_PASSWORD_HASH` | Web 登录密码的 scrypt 哈希（由 `ompweb hash-password` 生成）。绑定非回环地址时必须设置 | _无（未启用验证）_ |
+| `OMP_WEB_TRUSTED_HEADER_SHA256` | 受信任的反向代理在 `X-Omp-Web-Auth` 请求头中发送的密钥的 SHA-256 摘要（十六进制）；请求头哈希匹配的请求无需密码。omp-web 不保存密钥本身。生成方法和 nginx 配置示例见英文 README 的 “Skipping the password on trusted networks” 一节 | _无（未启用）_ |
 | `OMP_WEB_NO_OPEN` | 设为 `1` 时禁止自动打开浏览器 | `0` |
 | `OMP_WEB_DISABLE_AUTOUPDATE` | 设为 `1` 时禁用更新检查和应用内更新；修改后需重启 | `0` |
 | `OMP_WEB_NAME` | 浏览器标签页和已安装应用中显示的名称。设为 `url`、`host` 或 `domain`（不区分大小写）时使用浏览器所连接的主机名（不含端口），localhost 和 IP 地址仍显示 `omp web`；其他值按原样使用。修改后需重启 | `omp web` |

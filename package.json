@@ -1,6 +1,6 @@
 {
   "name": "@kahme247/ompweb",
-  "version": "0.5.1-habi.1",
+  "version": "0.5.2-habi.1",
   "description": "Web UI for the oh-my-pi (omp) coding agent",
   "homepage": "https://github.com/kahme247/ompweb#readme",
   "repository": {
@@ -12,7 +12,7 @@
   },
   "license": "MIT",
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=24.0.0"
   },
   "bin": {
     "ompweb": "bin/omp-web.js",

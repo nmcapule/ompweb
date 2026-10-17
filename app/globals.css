@@ -3934,6 +3934,24 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
+.tool-call-context-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  overflow: hidden;
+  background: var(--bg);
+}
+.tool-call-context-title {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-weight: 650;
+}
+.tool-call-context-body {
+  padding: 5px 8px;
+  color: var(--text-muted);
+}
 .tool-call-output {
   max-height: 260px;
   overflow: auto;
@@ -4520,16 +4538,12 @@ html[data-touch-targets="compact"] .settings-card {
 
 /* Extension request panel (components/ExtensionDialog.tsx): while the soft
    keyboard is up the footer with Cancel / Submit must stay comfortably
-   tappable, and the inline send control beside a typed answer is reached with
-   the same finger that is typing. */
-html[data-touch-targets="accessible"] :is(.extension-dialog-footer > button, .extension-dialog-send) {
+   tappable. */
+html[data-touch-targets="accessible"] .extension-dialog-footer > button {
   min-height: 44px;
 }
-html[data-touch-targets="accessible"] .extension-dialog-send {
-  min-width: 44px;
-}
 @media (max-width: 640px) and (pointer: coarse) and (hover: none) {
-  html:not([data-touch-targets="compact"]):not([data-touch-targets="accessible"]) :is(.extension-dialog-footer > button, .extension-dialog-send) {
+  html:not([data-touch-targets="compact"]):not([data-touch-targets="accessible"]) .extension-dialog-footer > button {
     min-height: 40px;
   }
 }
