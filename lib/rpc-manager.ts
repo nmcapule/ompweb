@@ -7,14 +7,26 @@ import { invalidateModelsCache } from "./models-cache";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
 import { readNativeSettings } from "./omp/settings-config";
 import { getAgentEnvOverrides } from "./omp/agent-env";
+import { editSessionHistory, isSessionEditReply, SESSION_EDIT_COMMAND, SESSION_EDIT_EXTENSION_PATH, SessionEditAgentInvocationError, type SessionEditResult } from "./omp/session-edit";
 import {
   cacheSessionPath,
   invalidateSessionEntriesCache,
   invalidateSessionListCache,
   invalidateSessionListMeta,
+  listAllSessions,
   readSessionHeader,
   resolveSessionPath,
 } from "./session-reader";
+import { allowFileRoot } from "./file-access";
+import { loadWebServerSettings } from "./web-settings";
+import {
+  AGENT_TOOL_DEFINITIONS,
+  AGENT_TOOL_NAMES,
+  AgentToolGuard,
+  executeAgentTool,
+  type AgentToolDeliverResult,
+  type AgentToolSessionOps,
+} from "./agent-tools";
 import { markShuttingDown, recordRunningSessions, RESUME_PROMPT, takeInterruptedSessions } from "./session-resume";
 import { PRESET_FULL } from "./tool-presets";
 import { comparableProjectPath } from "./comparable-path";
@@ -90,6 +102,11 @@ const PROMPT_ACK_TIMEOUT_MS = 30_000;
 const GENERATE_TITLE_TIMEOUT_MS = 60_000;
 const RENAME_POLL_INTERVAL_MS = 500;
 const RENAME_POLL_TIMEOUT_MS = 20_000;
+/** Background title requests per session. omp declines low-signal openers
+ * (a bare greeting), so a later turn of the same session retries. */
+const AUTO_TITLE_MAX_ATTEMPTS = 3;
+/** command_output lines printed by omp's argument-less `/rename`. */
+const RENAME_OUTPUT_RE = /^(Session renamed to |Could not generate a session title|Session name not changed|Rename failed:)/;
 const NON_TERMINAL_CONTINUATION_GRACE_MS = 2_000;
 const AWAITING_AGENT_START_TIMEOUT_MS = 10_000;
 const RESTARTING_MESSAGE = "This session is restarting — retry in a moment.";
@@ -164,6 +181,19 @@ const PREDICT_WORD_TIMEOUT_MS = 125_000;
 // payload reaches omp — a client is free to POST any of them directly.
 const IMAGE_BEARING_COMMANDS = new Set(["prompt", "steer", "follow_up", "abort_and_prompt"]);
 
+// These commands can append to, replace, or resume the active history. Edits
+// fence them across every attached client, including mutations already awaiting
+// a native acknowledgement when an edit arrives. Read-only queries and dialog
+// replies remain available while a navigation hook is running.
+const HISTORY_MUTATING_COMMANDS = new Set([
+  "edit_message", "prompt", "steer", "follow_up", "abort", "abort_and_prompt",
+  "abort_and_restore_queue", "remove_queued_message", "promote_queued_message",
+  "fork", "new_session", "switch_session", "compact", "abort_compaction",
+  "reload", "bash", "abort_bash", "handoff", "set_todos", "set_session_name",
+  "set_model", "cycle_model", "set_thinking_level", "cycle_thinking_level",
+  "set_fast_mode", "set_slow_mode", "set_auto_compaction", "set_auto_retry", "abort_retry",
+]);
+
 // pi-web commands with no omp RPC equivalent. The UI tolerates these failing.
 const UNSUPPORTED_COMMANDS: Record<string, string> = {
   navigate_tree: "Branch navigation is not supported over the omp RPC protocol",
@@ -193,13 +223,21 @@ export function mapPresetToolNames(toolNames: string[]): string[] {
 const FULL_PRESET_KEY = [...PRESET_FULL].map((n) => n.toLowerCase()).sort().join(",");
 
 /** Extra CLI args for spawning `omp --mode rpc-ui` for a session. */
-export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false, launchConfig?: ProjectLaunchConfig): string[] {
+export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false, launchConfig?: ProjectLaunchConfig, modelOverride?: string): string[] {
   const args: string[] = [];
   if (sessionFile) {
     // An absolute path (or anything containing "/") resolves deterministically:
     // omp's createSessionManager opens it directly via SessionManager.open
     // without any interactive resume/fork prompts (main.ts resume handling).
     args.push("--resume", sessionFile);
+    // An explicitly chosen model replaces the saved model and skips its
+    // restore check (omp's --model at startup). Without this, resuming a
+    // session whose saved model can no longer be restored dies before any
+    // set_model RPC can run (#277). Args are passed as an argv array, never
+    // through a shell, so only whitespace / flag-smuggled values are kept out.
+    if (modelOverride && !modelOverride.startsWith("-") && !/\s/.test(modelOverride)) {
+      args.push("--model", modelOverride);
+    }
   } else if (toolNames !== undefined) {
     const presetKey = toolNames.map((n) => n.toLowerCase()).sort().join(",");
     if (toolNames.length === 0) {
@@ -296,6 +334,8 @@ export class AgentSessionWrapper {
   private extensionWidgets = new Map<string, ExtensionWidgetItem>();
   private promptRunning = false;
   private promptDispatchPendingCount = 0;
+  private historyMutationPendingCount = 0;
+  private historyEditInFlight = false;
   private awaitingAgentStart = false;
   private awaitingAgentStartDeadline = 0;
   private continuationGraceUntil = 0;
@@ -400,7 +440,15 @@ export class AgentSessionWrapper {
   }
 
   isRunning(): boolean {
-    return this.isAlive() && (this.promptRunning || this.streaming || this.compacting || this.bashRunning);
+    // A human/host response can outlive the current streaming turn. Reaping it
+    // closes stdin and OMP records "Request was aborted", even without a Stop.
+    return this.isAlive() && (this.promptRunning || this.streaming || this.compacting || this.bashRunning
+      || this.pendingUiRequests.size > 0 || this.pendingHostTools.size > 0 || this.pendingHostUris.size > 0);
+  }
+
+  /** Local history navigation is busy control work, not an interruptible model turn. */
+  isEditingHistory(): boolean {
+    return this.historyEditInFlight;
   }
 
   /** A web UI (SSE stream) is currently attached to this session. */
@@ -452,6 +500,9 @@ export class AgentSessionWrapper {
   private reapIfDisconnected(): void {
     if (!this.isAlive() || this.hasSubscribers() || this.isRunning()
       || this.handshaking || this.pendingCommands > 0) {
+      // A paused human dialog produces no frames. Do not spin a zero-delay
+      // timer once the old deadline has passed while protected work remains.
+      this.reapDeadline = Math.max(this.reapDeadline, Date.now() + this.disconnectDestroyMs);
       this.armReap();
       return;
     }
@@ -460,7 +511,8 @@ export class AgentSessionWrapper {
       this.armReap();
       return;
     }
-    this.destroy();
+    console.info("[omp-web] automatic-session-cleanup", JSON.stringify({ sessionId: this._sessionId, reason: "disconnected-idle", at: new Date().toISOString() }));
+    this.destroy("disconnected-idle");
   }
 
   /** NDJSON messages are fresh snapshots; copy containers, not token payloads. */
@@ -580,18 +632,35 @@ export class AgentSessionWrapper {
 
   /** Whether omp answered `generate_title` with "Unknown command" (cached per child). */
   private generateTitleUnsupported = false;
+  /** Background title requests made per session id (see autoTitle). */
+  private autoTitleAttempts = new Map<string, number>();
+  private autoTitleInFlight = false;
+  /** Until this time, drop the chat output of a background `/rename`. */
+  private quietRenameUntil = 0;
 
   /**
    * Ask omp to generate a title for this session with its own title generator.
    * Prefers the native `generate_title` RPC command and falls back to the
    * argument-less `/rename` slash command. Returns null when omp cannot do
    * either right now (older omp, or the session is mid-run, where `/rename`
-   * would be queued as a prompt).
+   * would be queued as a prompt). With `quiet`, the `/rename` fallback skips
+   * the prompt bookkeeping (the UI never sees a run) and its output stays out
+   * of the chat.
    */
-  async generateTitle(): Promise<string | null> {
+  async generateTitle({ quiet = false }: { quiet?: boolean } = {}): Promise<string | null> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (!this.isAlive()) throw new Error("Session is no longer running");
 
+    if (this.historyEditInFlight) throw new WebRpcError("Wait for the history edit to finish", "session_busy");
+    this.historyMutationPendingCount += 1;
+    try {
+      return await this.generateSessionTitle(quiet);
+    } finally {
+      this.historyMutationPendingCount -= 1;
+    }
+  }
+
+  private async generateSessionTitle(quiet = false): Promise<string | null> {
     if (!this.generateTitleUnsupported) {
       try {
         const result = await this.proc.sendCommand<unknown>({ type: "generate_title" }, GENERATE_TITLE_TIMEOUT_MS);
@@ -608,7 +677,14 @@ export class AgentSessionWrapper {
     // prompt, so it must never be sent while a run is in flight.
     if (this.isRunning()) return null;
     const before = (await this.readSessionName()) ?? "";
-    await this.send({ type: "prompt", message: "/rename" });
+    if (quiet) {
+      // omp saves the title before it prints the result, so the poll below can
+      // finish first: the window closes on that output or on expiry instead.
+      this.quietRenameUntil = Date.now() + GENERATE_TITLE_TIMEOUT_MS;
+      await this.proc.sendCommand({ type: "prompt", message: "/rename" }, PROMPT_ACK_TIMEOUT_MS);
+    } else {
+      await this.send({ type: "prompt", message: "/rename" });
+    }
     const deadline = Date.now() + RENAME_POLL_TIMEOUT_MS;
     let title = await this.readSessionName();
     while (!(title && title !== before) && Date.now() < deadline && this.isAlive()) {
@@ -617,6 +693,29 @@ export class AgentSessionWrapper {
     }
     if (title) this.adoptSessionName(title);
     return title;
+  }
+
+  /**
+   * omp does not title sessions on its own in RPC mode
+   * (can1357/oh-my-pi#14616), so once a turn finishes, ask its title generator
+   * to name an untitled session, as omp's terminal UI does.
+   */
+  private autoTitle(): void {
+    const sessionId = this._sessionId;
+    if (!sessionId || this._sessionName || this.autoTitleInFlight) return;
+    // omp writes the session file once the history holds an assistant message.
+    if (!this._sessionFile || !existsSync(this._sessionFile)) return;
+    const attempts = this.autoTitleAttempts.get(sessionId) ?? 0;
+    if (attempts >= AUTO_TITLE_MAX_ATTEMPTS) return;
+    this.autoTitleAttempts.set(sessionId, attempts + 1);
+    this.autoTitleInFlight = true;
+    this.generateTitle({ quiet: true })
+      .catch((error) => {
+        console.warn(`[omp-web] could not title session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+      })
+      .finally(() => {
+        this.autoTitleInFlight = false;
+      });
   }
 
   private async readSessionName(): Promise<string | null> {
@@ -682,8 +781,14 @@ export class AgentSessionWrapper {
   }
 
   private handleFrame(frame: RpcFrame): void {
+    // The helper has its own process listener. Its correlated control replies
+    // must never become browser notices, replayed dialogs, or notifications,
+    // even when they arrive after a failed/timed-out edit.
+    if (isSessionEditReply(frame)) return;
     this.resetIdleTimer();
-    const event = frame;
+    const event = frame.type === "available_commands_update" && Array.isArray(frame.commands)
+      ? { ...frame, commands: (frame.commands as RpcAvailableSlashCommand[]).filter((command) => command.name !== SESSION_EDIT_COMMAND) }
+      : frame;
     let refreshSessionList = false;
 
     switch (event.type) {
@@ -696,6 +801,11 @@ export class AgentSessionWrapper {
           this.mcpListWaiter = null;
           waiter.resolve(event.text);
           notifyRunningChange();
+          return;
+        }
+        // The output of a background `/rename` (see autoTitle) is not chat content.
+        if (Date.now() < this.quietRenameUntil && typeof event.text === "string" && RENAME_OUTPUT_RE.test(event.text)) {
+          this.quietRenameUntil = 0;
           return;
         }
         break;
@@ -730,6 +840,7 @@ export class AgentSessionWrapper {
           this.awaitingAgentStartDeadline = 0;
           this.continuationGraceUntil = 0;
           this.invalidateSessionLists();
+          this.autoTitle();
         } else {
           this.continuationGraceUntil = Date.now() + NON_TERMINAL_CONTINUATION_GRACE_MS;
         }
@@ -809,6 +920,28 @@ export class AgentSessionWrapper {
       case "host_tool_call": {
         const id = typeof event.id === "string" ? event.id : "";
         const toolName = typeof event.toolName === "string" ? event.toolName : "";
+        // Server-side agent tools (#275) are answered here, before any
+        // browser routing, so they work with no tab open. A disabled gate
+        // is an explicit error, not a silent hang and not a browser call.
+        if (id && toolName && AGENT_TOOL_NAMES.has(toolName)) {
+          if (loadWebServerSettings().agentToolsEnabled) {
+            void this.answerServerAgentTool(event);
+          } else {
+            this.proc.sendFrame({
+              type: "host_tool_result",
+              id,
+              isError: true,
+              result: {
+                content: [{
+                  type: "text",
+                  text: "Agent tools are disabled. Enable \"Agent tools\" in omp-web Settings (System & Updates) first.",
+                }],
+              },
+            });
+            this.emit({ type: "notice", level: "warning", message: `Rejected disabled agent tool: ${toolName}` });
+          }
+          return;
+        }
         // Route REGISTERED host tools to an attached UI (the browser answers
         // via host_tool_result). With no tab on this session, hand the call to
         // any open omp-web tab (the user switched sessions mid-run). Otherwise
@@ -1143,11 +1276,12 @@ export class AgentSessionWrapper {
     this.lastIdleReset = now;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
-      if (this.isRunning()) {
+      if (this.isRunning() || this.handshaking || this.pendingCommands > 0) {
         this.resetIdleTimer(true);
         return;
       }
-      this.destroy();
+      console.info("[omp-web] automatic-session-cleanup", JSON.stringify({ sessionId: this._sessionId, reason: "idle-timeout", at: new Date().toISOString() }));
+      this.destroy("idle-timeout");
     }, IDLE_DESTROY_MS);
     // A cleanup deadline must not keep the process alive; the registry's
     // process-exit handler disposes every child anyway.
@@ -1187,6 +1321,73 @@ export class AgentSessionWrapper {
     this.onDestroyCallback = cb;
   }
 
+  /**
+   * Wait for the next `terminalEndsNeeded` terminal turn ends after this
+   * call (terminal agent_end, prompt_result, or prompt_error). The caller
+   * registers the waiter BEFORE sending the prompt/steer/follow_up, so a
+   * fast turn cannot end before the waiter exists. Rejects on timeout;
+   * the target is left running (never aborted by a waiter timeout).
+   * A follow_up sent to a running target needs two ends: the running
+   * turn ends first, then the queued message's own turn ends.
+   */
+  waitForTurnEnd(timeoutMs: number, terminalEndsNeeded = 1): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      let done = false;
+      let endsSeen = 0;
+      const timer = setTimeout(() => finish(new Error("Timed out waiting for the target session's response.")), timeoutMs);
+      timer.unref?.();
+      const detach = this.onEvent((event) => {
+        if (event.type === "agent_end" && event.isTerminal === false) return;
+        if (event.type === "agent_end" || event.type === "prompt_result") {
+          endsSeen += 1;
+          if (endsSeen >= terminalEndsNeeded) finish(null);
+        } else if (event.type === "prompt_error") {
+          finish(new Error(typeof event.errorMessage === "string" ? event.errorMessage : "Target session turn failed."));
+        }
+      });
+      const finish = (error: Error | null) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        detach();
+        if (error) reject(error);
+        else resolve();
+      };
+    });
+  }
+
+  /**
+   * Answer a server-side agent tool call (#275) from this wrapper's child.
+   * Runs on the server, with no browser involved, and answers directly
+   * with host_tool_result — never via pendingHostTools, so a later tab
+   * disconnect cannot settle it as a UI call.
+   */
+  private async answerServerAgentTool(event: UnsequencedAgentEvent): Promise<void> {
+    const id = typeof event.id === "string" ? event.id : "";
+    const toolName = typeof event.toolName === "string" ? event.toolName : "";
+    if (!id) return;
+    const sendResult = (text: string, isError = false) => {
+      this.proc.sendFrame({
+        type: "host_tool_result",
+        id,
+        isError,
+        result: { content: [{ type: "text", text }] },
+      });
+    };
+    try {
+      const args = event.arguments && typeof event.arguments === "object" ? event.arguments as Record<string, unknown> : {};
+      const result = await executeAgentTool(toolName, args, createAgentToolOps(), {
+        sourceSessionId: this.sessionId,
+        sourceCwd: this.cwd,
+        enabled: loadWebServerSettings().agentToolsEnabled,
+        guard: getAgentToolGuard(),
+      });
+      sendResult(typeof result === "string" ? result : JSON.stringify(result));
+    } catch (error) {
+      sendResult(error instanceof Error ? error.message : String(error), true);
+    }
+  }
+
   /** Called when a session-changing command re-keyed this wrapper (branch/new_session/switch_session). */
   onIdentityChange(cb: (oldId: string, newId: string, options?: IdentityChangeOptions) => void): void {
     this.onIdentityChangeCallback = cb;
@@ -1202,9 +1403,21 @@ export class AgentSessionWrapper {
 
   /** Get OMP's own complete MCP inventory and live connection states. */
   async getMcpList(): Promise<string> {
+    return this.runMcpCommand("list");
+  }
+
+  /** RPC /mcp reload refreshes command metadata only. Reboot the idle child
+   * against its saved session to actually rediscover MCP tools. */
+  async changeMcp(action: "enable" | "disable" | "reload", name?: string): Promise<void> {
+    if (!["enable", "disable", "reload"].includes(action)) throw new Error("Invalid MCP action");
+    if (action !== "reload" && (!name || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name))) throw new Error("Invalid MCP server name");
+    await this.runMcpCommand(action, name, true);
+  }
+
+  private async runMcpCommand(action: "list" | "enable" | "disable" | "reload", name?: string, apply = false): Promise<string> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (!this.isAlive()) throw new Error("Session is no longer running");
-    if (this.isRunning()) throw new WebRpcError("Wait for the current run to finish", "session_busy");
+    if (this.isRunning() || this.historyEditInFlight || this.pendingUiRequests.size > 0 || this.pendingHostTools.size > 0 || this.pendingHostUris.size > 0) throw new WebRpcError("Wait for the current operation to finish", "session_busy");
     if (this.mcpListWaiter || this.mcpListInFlight) throw new WebRpcError("MCP list is already loading", "mcp_list_loading");
 
     // Dedicated synchronous mutex: promptRunning alone is not atomic — two
@@ -1212,6 +1425,7 @@ export class AgentSessionWrapper {
     // would steal the waiter so the first hangs to timeout (or receives the
     // other's output). This flag is checked+set before any await.
     this.mcpListInFlight = true;
+    this.historyMutationPendingCount += 1;
 
     this.promptRunning = true;
     notifyRunningChange();
@@ -1246,8 +1460,16 @@ export class AgentSessionWrapper {
       // would never run and the wrapper would keep reporting itself as busy
       // (later calls fail with session_busy) until unrelated traffic cleared
       // the wedge. The 15s output wait above stays a separate concern.
-      await this.proc.sendCommand({ type: "prompt", message: "/mcp list" }, PROMPT_ACK_TIMEOUT_MS);
-      return await output;
+      await this.proc.sendCommand({ type: "prompt", message: action === "list" ? "/mcp list" : `/mcp ${action}${name ? ` ${name}` : ""}` }, PROMPT_ACK_TIMEOUT_MS);
+      const result = await output;
+      if (action !== "list" && /^(?:Failed|Usage:|Server .* not found|Unknown)/m.test(result)) {
+        throw new WebRpcError("OMP could not update this MCP server. Check its source configuration.", "mcp_change_failed");
+      }
+      if (apply) {
+        try { await this.restart(); }
+        catch { throw new WebRpcError("MCP configuration was saved, but session reload failed. Reopen the session to apply it.", "mcp_reload_failed"); }
+      }
+      return result;
     } catch (error) {
       const expired = error instanceof RpcCommandTimeoutError;
       if (this.mcpListWaiter === waiter) {
@@ -1274,6 +1496,7 @@ export class AgentSessionWrapper {
         this.mcpListWaiter = null;
       }
       this.mcpListInFlight = false;
+      this.historyMutationPendingCount -= 1;
       this.promptRunning = false;
       notifyRunningChange();
     }
@@ -1288,6 +1511,7 @@ export class AgentSessionWrapper {
     const awaitingExpired = !this.awaitingAgentStart || Date.now() >= this.awaitingAgentStartDeadline;
     const hasPendingWork =
       this.promptDispatchPendingCount > 0 ||
+      this.historyEditInFlight ||
       (this.awaitingAgentStart && !awaitingExpired) ||
       this.mcpListWaiter !== null ||
       this.pendingUiRequests.size > 0 ||
@@ -1385,6 +1609,91 @@ export class AgentSessionWrapper {
     return this._sessionId;
   }
 
+  private async editMessage(entryId: unknown): Promise<SessionEditResult> {
+    if (typeof entryId !== "string" || !entryId.trim()) {
+      throw new WebRpcError("The edit target must be a user message", "invalid_edit_target");
+    }
+    if (this.isRunning() || this.historyMutationPendingCount > 1) {
+      throw new WebRpcError("Wait for the current operation to finish before editing", "session_busy");
+    }
+
+    // Set synchronously, before the first native query: a second tab must not
+    // send a prompt, fork, or switch the process during either preflight await.
+    this.historyEditInFlight = true;
+    const proc = this.proc;
+    const sessionId = this._sessionId;
+    const sessionFile = this._sessionFile;
+    let persistenceError: Error | null = null;
+    // Keep observing through the authoritative post-edit state query as well
+    // as the helper's reply/ack exchange. The ordinary notice path still emits
+    // the native error to every observer.
+    const unsubscribe = proc.onFrame((frame) => {
+      if (frame.type === "notice" && frame.source === "session-persistence" && frame.level === "error") {
+        persistenceError ??= new Error(typeof frame.message === "string" ? frame.message : "OMP could not persist the history edit");
+      }
+    });
+    notifyRunningChange();
+    try {
+      const before = await this.getStateWithTimeout();
+      if (persistenceError) throw persistenceError;
+      if (before.sessionId !== sessionId || before.sessionFile !== sessionFile
+        || this._sessionId !== sessionId || this._sessionFile !== sessionFile) {
+        throw new WebRpcError("The session changed before the history edit", "session_changed");
+      }
+      if (typeof before.isSettled !== "boolean") {
+        throw new WebRpcError("Editing history requires a newer OMP that reports full session settlement", "session_edit_unsupported");
+      }
+      if (!before.isSettled || before.hasPendingAsyncWork === true
+        || before.isStreaming || before.isCompacting || before.queuedMessageCount > 0
+        || this.promptRunning || this.streaming || this.compacting || this.bashRunning) {
+        throw new WebRpcError("Wait for the current run to finish before editing", "session_busy");
+      }
+
+      const result = await editSessionHistory(proc, entryId, sessionId);
+      const after = await this.getStateWithTimeout();
+      if (persistenceError) throw persistenceError;
+      const unchanged = after.sessionId === sessionId && after.sessionFile === sessionFile;
+      // Only applyIdentity's native move path can retain the originating id.
+      // A reply naming a different conversation is never sufficient evidence.
+      const moved = this.movedFromIds.includes(sessionId) && after.sessionId !== sessionId;
+      if (!this.isAlive() || this.proc !== proc || result.sessionId !== after.sessionId
+        || (!unchanged && !moved) || this._sessionId !== after.sessionId || this._sessionFile !== after.sessionFile) {
+        throw new WebRpcError("The session changed during the history edit", "session_changed");
+      }
+      if (result.cancelled) return result;
+
+      this.clearLiveSnapshots();
+      this.responseObserved = false;
+      this.responseRunActive = false;
+      this.awaitingAgentStart = false;
+      this.awaitingAgentStartDeadline = 0;
+      this.continuationGraceUntil = 0;
+      // Invalidate the confirmed edited conversation, not its preserved source.
+      this.invalidateSessionLists();
+      this.emit({ type: "session_history_changed", leafId: result.leafId });
+      notifyRunningChange({ refreshSessionList: true });
+      return result;
+    } catch (error) {
+      if (error instanceof RpcCommandTimeoutError) {
+        // A timed-out navigation may still be running in a hook. Do not let a
+        // later mutation race it once the web-side fence is released.
+        await this.destroyAndWait();
+        if (persistenceError) throw persistenceError;
+        throw new WebRpcError("The OMP session stopped responding and was reset.", "session_unresponsive");
+      }
+      if (error instanceof SessionEditAgentInvocationError && !error.agentStarted) {
+        // Native /retry can acknowledge before its deferred agent_start. There
+        // is no observed run to own that gap: stop it before releasing Edit.
+        await this.destroyAndWait();
+      }
+      throw persistenceError ?? error;
+    } finally {
+      unsubscribe();
+      this.historyEditInFlight = false;
+      notifyRunningChange();
+    }
+  }
+
   /** Full restart of the child process against the same session file. This is
    * omp-web's `reload`: extensions, skills, prompts, and tools are rediscovered
    * on boot, matching a fresh CLI launch. */
@@ -1426,7 +1735,7 @@ export class AgentSessionWrapper {
         // Re-read per spawn so a restart picks up environment values the user
         // added in Settings after this session was created (#104).
         env: getAgentEnvOverrides(),
-        extraArgs: buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, this.advisorSpawned, launchConfigForCwd(this.cwd)),
+        extraArgs: [...buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, this.advisorSpawned, launchConfigForCwd(this.cwd)), "--extension", SESSION_EDIT_EXTENSION_PATH],
         onExit: (info) => {
           if (this.proc === proc) this.handleProcessExit(info, proc);
         },
@@ -1468,7 +1777,16 @@ export class AgentSessionWrapper {
 
   async send(command: Record<string, unknown>): Promise<unknown> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
+    if (this.mcpListInFlight) throw new WebRpcError("MCP management is in progress. Try again when it finishes.", "session_busy");
     if (!this.isAlive()) throw new Error("Session is no longer running");
+    if (typeof command.type === "string" && command.type.startsWith("abort")) {
+      console.info("[omp-web] cancellation-command", JSON.stringify({ sessionId: this._sessionId, type: command.type, at: new Date().toISOString() }));
+    }
+    const mutatesHistory = HISTORY_MUTATING_COMMANDS.has(command.type as string);
+    if (mutatesHistory && this.historyEditInFlight) {
+      throw new WebRpcError("Wait for the history edit to finish", "session_busy");
+    }
+    if (mutatesHistory) this.historyMutationPendingCount += 1;
     this.resetIdleTimer();
     // Covers the whole command, including the awaits inside it: a route that
     // has an unwatched session in mid-command (predict_word on a keystroke, an
@@ -1478,6 +1796,7 @@ export class AgentSessionWrapper {
       return await this.dispatchCommand(command);
     } finally {
       this.pendingCommands = Math.max(0, this.pendingCommands - 1);
+      if (mutatesHistory) this.historyMutationPendingCount -= 1;
     }
   }
 
@@ -1545,9 +1864,8 @@ export class AgentSessionWrapper {
           notifyRunningChange();
           if (error instanceof RpcCommandTimeoutError) {
             // The child took the frame but never acked it, so nothing will ever
-            // report this run: recycle it exactly like the get_state timeout
-            // path so the next request spawns a fresh child instead of talking
-            // to a wedged one.
+            // report this run: recycle the unacknowledged prompt. A read-only
+            // get_state timeout deliberately does not take this destructive path.
             await this.destroyAndWait();
             throw new WebRpcError("The OMP session stopped responding and was reset.", "session_unresponsive");
           }
@@ -1613,8 +1931,10 @@ export class AgentSessionWrapper {
           return this.buildWebState(state);
         } catch (error) {
           if (error instanceof RpcCommandTimeoutError) {
-            await this.destroyAndWait();
-            throw new WebRpcError("The OMP session stopped responding and was reset.", "session_unresponsive");
+            // This is only an observer poll. A busy event loop or delayed RPC
+            // response is not authority to stop generation or a pending tool.
+            console.warn("[omp-web] status-query-timeout", JSON.stringify({ sessionId: this._sessionId, timeoutMs: GET_STATE_TIMEOUT_MS, running: this.isRunning(), action: "preserved", at: new Date().toISOString() }));
+            throw new WebRpcError("The OMP status query timed out. The session was left running; retry shortly.", "session_state_timeout");
           }
           throw error;
         }
@@ -1656,6 +1976,9 @@ export class AgentSessionWrapper {
         const result = await this.proc.sendCommand<{ enabled?: boolean }>({ type: "set_slow_mode", enabled });
         return { enabled: result?.enabled ?? enabled };
       }
+
+      case "edit_message":
+        return this.editMessage(command.entryId);
 
       case "fork": {
         // omp's `branch` is pi-web's fork: it creates a branched session file
@@ -1736,7 +2059,7 @@ export class AgentSessionWrapper {
         const data = await this.proc.sendCommand<{ commands: RpcAvailableSlashCommand[] }>({
           type: "get_available_commands",
         });
-        return data;
+        return { ...data, commands: data.commands.filter((command) => command.name !== SESSION_EDIT_COMMAND) };
       }
 
       case "reload": {
@@ -1786,8 +2109,16 @@ export class AgentSessionWrapper {
       case "set_host_tools": {
         const tools = Array.isArray(command.tools) ? command.tools as Array<{ name?: unknown; [key: string]: unknown }> : [];
         const valid = tools.filter((t) => typeof t.name === "string" && t.name);
-        this.hostToolNames = new Set(valid.map((t) => t.name as string));
-        await this.proc.sendCommand({ type: "set_host_tools", tools: valid });
+        // Merge the server agent tools (#275) into every registration when
+        // the gate is on, so a later UI registration cannot drop them and
+        // a no-tab session keeps them after its startup registration.
+        // With the gate off the registration is exactly what the caller
+        // asked for, so existing behavior and tests are unchanged.
+        const merged = loadWebServerSettings().agentToolsEnabled
+          ? [...valid, ...AGENT_TOOL_DEFINITIONS.filter((t) => !valid.some((v) => v.name === t.name))]
+          : valid;
+        this.hostToolNames = new Set(merged.map((t) => t.name as string));
+        await this.proc.sendCommand({ type: "set_host_tools", tools: merged });
         return null;
       }
 
@@ -1855,18 +2186,19 @@ export class AgentSessionWrapper {
     return { queued: true, queue: "followUp", reason: "shellRunning" };
   }
 
-  destroy(): void {
-    void this.destroyAndWait();
+  destroy(reason = "unspecified"): void {
+    void this.destroyAndWait(reason);
   }
 
   /** Destroy and resolve only after the omp child has fully exited. Callers
    * that delete the session file afterwards must await this — omp flushes
    * session state on shutdown and would otherwise recreate the file. */
-  async destroyAndWait(): Promise<void> {
+  async destroyAndWait(reason = "unspecified"): Promise<void> {
     // Re-entrant calls join the in-flight dispose; without this a new spawn
     // can overlap the old child's shutdown (see startRpcSession).
     if (this.destroyPromise) return this.destroyPromise;
     if (!this._alive) return;
+    console.info("[omp-web] session-dispose", JSON.stringify({ sessionId: this._sessionId, reason, running: this.isRunning(), pendingDialogs: this.pendingUiRequests.size, at: new Date().toISOString(), caller: new Error().stack?.split("\n").slice(2, 5).map((line) => line.trim()) }));
     this._alive = false;
     this.streaming = false;
     this.promptRunning = false;
@@ -2022,7 +2354,7 @@ export function subscribeRunningSessions(listener: (update: RunningSessionUpdate
 // Cross-session host tool calls
 //
 // A registered host tool called while no tab watches its session goes to every
-// open omp-web tab (over /api/agent/host-tools/events) instead of being rejected.
+// open omp-web tab (over the `host-tools` event-stream channel) instead of being rejected.
 // ----------------------------------------------------------------------------
 
 function getHostToolListeners(): Set<(call: CrossSessionHostToolCall) => void> {
@@ -2118,6 +2450,94 @@ export function isAdvisorEnabled(advisor: boolean | undefined, launchConfig?: Pr
  * Pass toolNames to pre-configure the builtin toolset of a NEW session
  * (empty array = all tools disabled); ignored when resuming.
  */
+declare global {
+  var __ompAgentToolGuard: AgentToolGuard | undefined;
+}
+
+/** Process-wide loop/spam guard for server agent tools (#275). Stored on
+ * globalThis like the session registry so a hot reload does not silently
+ * reset the chain depths mid-loop. */
+function getAgentToolGuard(): AgentToolGuard {
+  if (!globalThis.__ompAgentToolGuard) globalThis.__ompAgentToolGuard = new AgentToolGuard();
+  return globalThis.__ompAgentToolGuard;
+}
+
+/**
+ * Real session operations behind lib/agent-tools executeAgentTool.
+ * Reuses the existing spawn/resume and message-send paths (startRpcSession,
+ * wrapper.send) instead of a second session engine. Delivery rules, kept
+ * explicit because omp's commands do not all make sense in every state:
+ * - prompt: only when the target is idle (starts a new turn);
+ * - steer: only when the target is running (steers that turn);
+ * - followUp: any state (queues behind a running turn, or starts one
+ *   when idle — omp owns the queue, as with the UI's follow-ups).
+ * A waited delivery registers its turn-end waiter BEFORE sending, then
+ * reads the turn's final text with get_last_assistant_text.
+ */
+function createAgentToolOps(): AgentToolSessionOps {
+  return {
+    async listSessions() {
+      const running = new Set(getRunningRpcSessionIds());
+      const sessions = await listAllSessions();
+      return sessions.map((s) => ({ id: s.id, name: s.name, cwd: s.cwd, running: running.has(s.id) }));
+    },
+
+    async createSession(input) {
+      if (!existsSync(input.cwd)) throw new Error(`Directory does not exist: ${input.cwd}`);
+      const tempKey = `__new__${randomUUID()}`;
+      const { session, realSessionId } = await startRpcSession(tempKey, "", input.cwd, undefined, undefined);
+      allowFileRoot(input.cwd);
+      invalidateSessionListCache();
+      try {
+        if (input.provider && input.modelId) {
+          await session.send({ type: "set_model", provider: input.provider, modelId: input.modelId });
+        }
+        if (input.name) await session.send({ type: "set_session_name", name: input.name });
+        if (input.prompt) await session.send({ type: "prompt", message: input.prompt });
+      } catch (error) {
+        await session.destroyAndWait();
+        throw error;
+      }
+      return { sessionId: realSessionId };
+    },
+
+    async deliver(input): Promise<AgentToolDeliverResult> {
+      const live = getRpcSession(input.sessionId);
+      let wrapper = live?.isAlive() ? live : undefined;
+      if (!wrapper) {
+        const filePath = await resolveSessionPath(input.sessionId);
+        if (!filePath) throw new Error(`Session not found: ${input.sessionId}`);
+        const header = readSessionHeader(filePath);
+        const { cwd } = resolveSpawnCwdResult(header?.cwd);
+        const started = await startRpcSession(input.sessionId, filePath, cwd, undefined, undefined, header?.cwd);
+        wrapper = started.session;
+      }
+      const wasRunning = wrapper.isRunning();
+      if (input.delivery === "prompt" && wasRunning) {
+        throw new Error("Target session is running; use delivery \"steer\" or \"followUp\" for a running target.");
+      }
+      if (input.delivery === "steer" && !wasRunning) {
+        throw new Error("Target session is not running; use delivery \"prompt\" to start a turn.");
+      }
+      const terminalEndsNeeded = input.delivery === "followUp" && wasRunning ? 2 : 1;
+      const waiter = input.wait ? wrapper.waitForTurnEnd(input.waitTimeoutMs, terminalEndsNeeded) : null;
+      await wrapper.send({ type: input.delivery, message: input.message });
+      if (!input.wait || !waiter) {
+        return { accepted: true, targetSessionId: input.sessionId, delivery: input.delivery, waited: false, responseText: null };
+      }
+      await waiter;
+      const last = (await wrapper.send({ type: "get_last_assistant_text" })) as { text?: unknown } | null;
+      return {
+        accepted: true,
+        targetSessionId: input.sessionId,
+        delivery: input.delivery,
+        waited: true,
+        responseText: typeof last?.text === "string" ? last.text : null,
+      };
+    },
+  };
+}
+
 export async function startRpcSession(
   sessionId: string,
   sessionFile: string,
@@ -2130,6 +2550,16 @@ export async function startRpcSession(
    * fallback (recorded dir gone) and warn the user. Omit for new sessions. */
   recordedCwd?: string | null,
   launchConfig?: ProjectLaunchConfig,
+  /** Model to bind at spawn time as `provider/modelId` (--model). Only used
+   * when resuming: it replaces the saved model and skips its restore check,
+   * so a cold set_model can recover a session whose saved model is gone
+   * (#277). Ignored when a live child is reused; the caller's set_model RPC
+   * then runs against that child as before. The spawn alone does not rewrite
+   * the session file, so a later spawn without an override still hits the
+   * old saved model until omp records a new one (a successful set_model RPC
+   * or a completed turn); the picker path re-binds on each cold switch, so
+   * the user is never stuck on the unrestorable model. */
+  spawnModel?: string,
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
@@ -2148,7 +2578,7 @@ export async function startRpcSession(
     // children are kept (a mid-run swap would drop in-flight work) and pick
     // the new flag up at the next natural respawn; callers that pass no
     // advisor opinion (undefined) simply reuse whatever is running.
-    if (advisor === undefined || existing.advisorSpawned === effectiveAdvisor || existing.isRunning()) {
+    if (advisor === undefined || existing.advisorSpawned === effectiveAdvisor || existing.isRunning() || existing.isEditingHistory()) {
       return { session: existing, realSessionId: sessionId };
     }
     await existing.destroyAndWait();
@@ -2181,7 +2611,7 @@ export async function startRpcSession(
       cwd,
       // User-configured variables for MCP servers and generated configs (#104).
       env: getAgentEnvOverrides(),
-      extraArgs: buildSessionSpawnArgs(sessionFile, toolNames, advisor === true, launchConfig),
+      extraArgs: [...buildSessionSpawnArgs(sessionFile, toolNames, advisor === true, launchConfig, spawnModel), "--extension", SESSION_EDIT_EXTENSION_PATH],
       onExit: (info) => holder.wrapper?.handleProcessExit(info, proc),
     });
     const created = new AgentSessionWrapper(
@@ -2204,6 +2634,15 @@ export async function startRpcSession(
       // first message), so this never fires for a real new session.
       if (!sessionFile && created.sessionFile && existsSync(created.sessionFile)) {
         await created.send({ type: "new_session" });
+      }
+      // Register server agent tools (#275) at startup when the gate is on,
+      // so a session works for agent-to-agent calls even when no browser
+      // tab ever registers host tools for it. send() merges these with any
+      // later UI registration, so this never drops the UI tools. Older omp
+      // builds without host tools simply reject the registration; ignore
+      // that the way the UI registration does.
+      if (loadWebServerSettings().agentToolsEnabled) {
+        await created.send({ type: "set_host_tools", tools: AGENT_TOOL_DEFINITIONS }).catch(() => {});
       }
     } catch (error) {
       // Await the child's full exit before the `finally` releases the startup

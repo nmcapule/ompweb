@@ -1,6 +1,6 @@
 {
   "name": "@kahme247/ompweb",
-  "version": "0.5.2-habi.2",
+  "version": "0.6.0-habi.1",
   "description": "Web UI for the oh-my-pi (omp) coding agent",
   "homepage": "https://github.com/kahme247/ompweb#readme",
   "repository": {
@@ -61,7 +61,6 @@
   "dependencies": {
     "@base-ui/react": "^1.7.0",
     "cmdk": "^1.1.1",
-    "dbus-next": "^0.10.2",
     "jiti": "^2.7.0",
     "katex": "^0.16.47",
     "lucide-react": "^1.39.0",
