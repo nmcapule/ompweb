@@ -7,6 +7,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 ## 0.6.0-habi.1
 
 - Merge upstream through `1317bf3`, including upstream 0.6.0 and its systemd updater fixes. Retain the fork's workspace-advisor session fix, empty-history boundaries, and verified staged deployment workflow. Keep history-editing sessions alive when the advisor setting changes.
+- Isolate the self-update lease tests from the host's `OMP_WEB_DISABLE_AUTOUPDATE` flag, so fork release verification exercises lease expiry and renewal without enabling npm updates in the deployed service.
 
 ## 0.5.2-habi.2
 
